@@ -3,7 +3,8 @@ module sweSim1D
 using Plots
 using StaticArrays
 export sw_muscl_hll, sw_snapshots, animate_sw,
-       default_ic_dambreak, default_ic_sine, default_source_zero
+       default_ic_dambreak, default_ic_sine, default_source_zero,
+       default_bathymetry
 
 # ------------------ Physics & constants ------------------
 const g = 9.81
@@ -61,14 +62,27 @@ end
     end
 end
 
+# ------------------ Bathymetry ------------------
+default_bathymetry(x) = zeros(length(x))   # flat bottom
+
+function bathy_source!(hout, mout, x, t, bfun)
+    b = bfun(x)
+    dx = x[2]-x[1]
+    dbdx = similar(b)
+    dbdx[1] = (b[2]-b[1]) / dx
+    dbdx[end] = (b[end]-b[end-1]) / dx
+    @inbounds for i in 2:length(b)-1
+        dbdx[i] = (b[i+1]-b[i-1]) / (2*dx)   # FIX: 2*dx (not 2dx)
+    end
+    # Add source term to momentum: m_t += - g h b_x
+    @inbounds for i in eachindex(hout)
+        mout[i] -= g * hout[i] * dbdx[i]
+    end
+end
+
 # ------------------ Reflective flux builder ---------------
-# Build F̂ on N+1 interfaces with reflective (wall) BCs:
-# interface 1:   ghost|cell 1     (u flips, h mirrors)
-# interfaces 2..N: between cells
-# interface N+1: cell N|ghost
 function build_fluxes_reflective!(Fhat, h, m; limiter::Symbol=:mc, solver::Symbol=:hll)
     inds = axes(h,1); fi, li = firstindex(h), lastindex(h)
-    N = length(h)
 
     # 1) primitives (h,u) with positivity/caps
     hpr = similar(h); upr = similar(h)
@@ -83,13 +97,13 @@ function build_fluxes_reflective!(Fhat, h, m; limiter::Symbol=:mc, solver::Symbo
     sh = similar(hpr); su = similar(upr)
     @inbounds for i in inds
         if i == fi
-            hm, um = hpr[fi], -upr[fi]          # left ghost: mirror h, flip u
+            hm, um = hpr[fi], -upr[fi]
             hp, up = hpr[fi+1], upr[fi+1]
             sh[i] = slope_limited(hm, hpr[i], hp; limiter=limiter)
             su[i] = slope_limited(um, upr[i], up; limiter=limiter)
         elseif i == li
             hm, um = hpr[li-1], upr[li-1]
-            hp, up = hpr[li],   -upr[li]        # right ghost
+            hp, up = hpr[li],   -upr[li]
             sh[i] = slope_limited(hm, hpr[i], hp; limiter=limiter)
             su[i] = slope_limited(um, upr[i], up; limiter=limiter)
         else
@@ -101,23 +115,22 @@ function build_fluxes_reflective!(Fhat, h, m; limiter::Symbol=:mc, solver::Symbo
 
     # 3) interface fluxes (N+1)
     amax = 0.0
-    # indices for Fhat dimension 1
     If = axes(Fhat,1); iF1, iFN = first(If), last(If)
 
-    # left boundary: ghost | cell fi  → interface iF1
+    # left boundary: ghost | cell fi
     let
-        hL = hpr[fi]; uL = -upr[fi]                       # ghost
-        hR = max(HMIN, hpr[fi] - 0.5*sh[fi])              # cell face (right side)
+        hL = hpr[fi]; uL = -upr[fi]
+        hR = max(HMIN, hpr[fi] - 0.5*sh[fi])
         uR = capu(upr[fi] - 0.5*su[fi])
         f = (solver === :hll) ? hll_flux(hL,uL,hR,uR) : rusanov_flux(hL,uL,hR,uR)
         Fhat[iF1,1] = f[1]; Fhat[iF1,2] = f[2]
         amax = max(amax, abs(uL)+sqrt(g*hL), abs(uR)+sqrt(g*hR))
     end
 
-    # interior interfaces k = 2..N  map to between cell (k-1) and k
+    # interior interfaces k = 2..N
     @inbounds for k in (iF1+1):(iFN-1)
-        il = fi + (k - iF1) - 1    # left cell index
-        ir = il + 1                # right cell index
+        il = fi + (k - iF1) - 1
+        ir = il + 1
         hL = max(HMIN, hpr[il] + 0.5*sh[il])
         uL = capu(upr[il] + 0.5*su[il])
         hR = max(HMIN, hpr[ir] - 0.5*sh[ir])
@@ -127,11 +140,11 @@ function build_fluxes_reflective!(Fhat, h, m; limiter::Symbol=:mc, solver::Symbo
         amax = max(amax, abs(uL)+sqrt(g*hL), abs(uR)+sqrt(g*hR))
     end
 
-    # right boundary: cell li | ghost  → interface iFN
+    # right boundary: cell li | ghost
     let
-        hL = max(HMIN, hpr[li] + 0.5*sh[li])              # cell face (left side)
+        hL = max(HMIN, hpr[li] + 0.5*sh[li])
         uL = capu(upr[li] + 0.5*su[li])
-        hR = hpr[li]; uR = -upr[li]                       # ghost
+        hR = hpr[li]; uR = -upr[li]
         f = (solver === :hll) ? hll_flux(hL,uL,hR,uR) : rusanov_flux(hL,uL,hR,uR)
         Fhat[iFN,1] = f[1]; Fhat[iFN,2] = f[2]
         amax = max(amax, abs(uL)+sqrt(g*hL), abs(uR)+sqrt(g*hR))
@@ -141,9 +154,9 @@ function build_fluxes_reflective!(Fhat, h, m; limiter::Symbol=:mc, solver::Symbo
 end
 
 # ------------------ Euler step (reflective) ----------------
-@inline function euler_step_reflective!(hout, mout, h, m, Fhat, dt_dx, x, t, source_fun)
+@inline function euler_step_reflective!(hout, mout, h, m, Fhat, dt_dx, x, t,
+                                        source_fun, bfun=default_bathymetry)
     inds = axes(h,1); fi = firstindex(h)
-    # interface indexing: for cell i, left interface kL = (i - fi) + first(Fhat axes), right = kL+1
     offset = first(axes(Fhat,1)) - fi
     @inbounds for i in inds
         kL = i + offset
@@ -151,8 +164,11 @@ end
         hout[i] = h[i] - dt_dx*(Fhat[kR,1] - Fhat[kL,1])
         mout[i] = m[i] - dt_dx*(Fhat[kR,2] - Fhat[kL,2])
     end
-    # source term (in-place)
+
+    # user source + bathymetry source
     source_fun(hout, mout, x, t)
+    bathy_source!(hout, mout, x, t, bfun)
+
     # positivity / dry fix
     @inbounds for i in inds
         if hout[i] < HMIN
@@ -179,13 +195,11 @@ default_source_zero(h, m, x, t) = nothing
 
 """
     sw_muscl_hll(N, L, T; CFL=0.4, limiter=:mc, solver=:hll,
-                 ic_fun=default_ic_sine, source_fun=default_source_zero)
-
-1D shallow water with MUSCL + HLL/Rusanov, SSPRK2, **reflective boundaries**.
-Returns (x, h, m) at time T.
+                 ic_fun=default_ic_sine, source_fun=default_source_zero, bfun=default_bathymetry)
 """
 function sw_muscl_hll(N, L, T; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=:hll,
-                      ic_fun = default_ic_sine, source_fun = default_source_zero)
+                      ic_fun=default_ic_sine, source_fun=default_source_zero,
+                      bfun=default_bathymetry)
     dx = L/N
     x  = @. (0.5:1:N-0.5) * dx
 
@@ -193,7 +207,7 @@ function sw_muscl_hll(N, L, T; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=:hll
     h = collect(hvec)
     m = similar(h); @inbounds for i in eachindex(h); m[i] = h[i]*uvec[i]; end
 
-    Fhat = zeros(eltype(h), length(h)+1, 2)  # N+1 interfaces for reflective BCs
+    Fhat = zeros(eltype(h), length(h)+1, 2)
     h1 = similar(h); m1 = similar(h)
     h2 = similar(h); m2 = similar(h)
 
@@ -203,9 +217,9 @@ function sw_muscl_hll(N, L, T; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=:hll
         dt = (amax > 0) ? min(CFL*dx/amax, T - t) : (T - t)
         dt_dx = dt/dx
 
-        euler_step_reflective!(h1,m1, h,m, Fhat, dt_dx, x, t, source_fun)
-        _ = build_fluxes_reflective!(Fhat, h1, m1; limiter=limiter, solver=solver)
-        euler_step_reflective!(h2,m2, h1,m1, Fhat, dt_dx, x, t+dt, source_fun)
+        euler_step_reflective!(h1,m1, h,m, Fhat, dt_dx, x, t, source_fun, bfun)
+        _ = build_fluxes_reflective!(Fhat, h1,m1; limiter=limiter, solver=solver)
+        euler_step_reflective!(h2,m2, h1,m1, Fhat, dt_dx, x, t+dt, source_fun, bfun)
 
         @inbounds for i in eachindex(h)
             h[i] = 0.5*(h[i] + h2[i])
@@ -217,7 +231,8 @@ function sw_muscl_hll(N, L, T; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=:hll
 end
 
 function sw_snapshots(N, L, times; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=:hll,
-                      ic_fun = default_ic_sine, source_fun = default_source_zero)
+                      ic_fun=default_ic_sine, source_fun=default_source_zero,
+                      bfun=default_bathymetry)
     dx = L/N
     x  = @. (0.5:1:N-0.5) * dx
 
@@ -244,9 +259,9 @@ function sw_snapshots(N, L, times; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=
             dt = (amax > 0) ? min(CFL*dx/amax, target - t) : (target - t)
             dt_dx = dt/dx
 
-            euler_step_reflective!(h1,m1, h,m, Fhat, dt_dx, x, t, source_fun)
+            euler_step_reflective!(h1,m1, h,m, Fhat, dt_dx, x, t, source_fun, bfun)
             _ = build_fluxes_reflective!(Fhat, h1, m1; limiter=limiter, solver=solver)
-            euler_step_reflective!(h2,m2, h1,m1, Fhat, dt_dx, x, t+dt, source_fun)
+            euler_step_reflective!(h2,m2, h1,m1, Fhat, dt_dx, x, t+dt, source_fun, bfun)
 
             @inbounds for i in eachindex(h)
                 h[i] = 0.5*(h[i] + h2[i])
@@ -261,11 +276,11 @@ function sw_snapshots(N, L, times; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=
 end
 
 function animate_sw(N, L, T; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=:hll,
-                    ic_fun = default_ic_sine, source_fun = default_source_zero,
+                    ic_fun=default_ic_sine, source_fun=default_source_zero, bfun=default_bathymetry,
                     fps::Integer=30, ylim_h=(0.0,2.0), ylim_u=(-2.0,2.0),
                     path::AbstractString="shallow_water.gif")
     x, h, m = sw_muscl_hll(N, L, 0.0; CFL=CFL, limiter=limiter, solver=solver,
-                           ic_fun=ic_fun, source_fun=source_fun)
+                           ic_fun=ic_fun, source_fun=source_fun, bfun=bfun)
     anim = Animation()
 
     t = 0.0
@@ -275,21 +290,20 @@ function animate_sw(N, L, T; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=:hll,
     h2 = similar(h); m2 = similar(h)
 
     while t < T - eps()
-        # plot frame
+        # frame
         u = similar(h); @inbounds for i in eachindex(h); u[i] = (h[i] > HMIN) ? m[i]/h[i] : 0.0; end
         p1 = plot(x, h, xlabel="x", ylabel="h", ylim=ylim_h, label=false, title="t=$(round(t,digits=3))")
         p2 = plot(x, u, xlabel="x", ylabel="u", ylim=ylim_u, label=false)
-        p  = plot(p1, p2, layout=(2,1))
-        frame(anim, p)
+        frame(anim, plot(p1, p2, layout=(2,1)))
 
-        # advance one SSPRK2 step
+        # step
         amax = build_fluxes_reflective!(Fhat, h, m; limiter=limiter, solver=solver)
         dt = (amax > 0) ? min(CFL*dx/amax, T - t) : (T - t)
         dt_dx = dt/dx
 
-        euler_step_reflective!(h1,m1, h,m, Fhat, dt_dx, x, t, source_fun)
+        euler_step_reflective!(h1,m1, h,m, Fhat, dt_dx, x, t, source_fun, bfun)
         _ = build_fluxes_reflective!(Fhat, h1, m1; limiter=limiter, solver=solver)
-        euler_step_reflective!(h2,m2, h1,m1, Fhat, dt_dx, x, t+dt, source_fun)
+        euler_step_reflective!(h2,m2, h1,m1, Fhat, dt_dx, x, t+dt, source_fun, bfun)
 
         @inbounds for i in eachindex(h)
             h[i] = 0.5*(h[i] + h2[i])
