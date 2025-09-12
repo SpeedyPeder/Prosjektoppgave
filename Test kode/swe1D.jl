@@ -8,7 +8,7 @@ using Plots
 using Printf
 
 # ---------------- Params ----------------
-N, L = 400, 5.0
+N, L = 100, 5.0
 CFL  = 0.45
 T    = 1.0
 lim  = :mc
@@ -19,11 +19,13 @@ hl, hr = 1.0, 0.2
 times = 0.0:0.1:T
 
 # ---------------- Bathymetry ----------------
-# Uncomment one of these to add bathymetry,
-# or leave all commented for flat bottom
-# bfun(x) = zeros(length(x))                            # flat (default)
-# bfun(x) = @. 0.25 * exp(-((x - 0.7*L)^2) / (0.05*L)^2) # Gaussian bump
-bfun(x) = [xi < 0.6L ? 0.0 : 0.15 for xi in x]        # step
+# bfun(x) = zeros(length(x))                            
+# bfun(x) = @. 0.25 * exp(-((x - 0.7*L)^2) / (0.05*L)^2) 
+#bfun(x) = [xi < 0.6L ? 0.0 : 0.15 for xi in x]        
+bfun(x) = @. 0.12*(x/L) + (x > 0.7L ? 0.08 : 0.0)
+# bfun(x) = @. 0.18 * exp(-((x - 0.72L)^2) / (0.06L)^2)
+# bfun(x) = @. (x > 0.55L ? 0.07 : 0.0) + (x > 0.82L ? 0.05 : 0.0)
+
 
 # ---------------- Initial condition ----------------
 ic_fun(x) = ( [xi < x0 ? hl : hr for xi in x], zeros(length(x)) )
