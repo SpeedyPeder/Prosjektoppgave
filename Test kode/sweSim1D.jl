@@ -4,7 +4,7 @@ using Plots
 using StaticArrays
 export sw_muscl_hll, sw_snapshots, animate_sw,
        default_ic_dambreak, default_ic_sine, default_source_zero,
-       default_bathymetry
+       default_bathymetry, g, HMIN
 
 # ------------------ Physics & constants ------------------
 const g = 9.81
@@ -62,21 +62,67 @@ end
     end
 end
 
-# ------------------ Bathymetry ------------------
+# ------------------ Bathymetry & sources ------------------
 default_bathymetry(x) = zeros(length(x))   # flat bottom
 
-function bathy_source!(hout, mout, x, t, bfun)
-    b = bfun(x)
-    dx = x[2]-x[1]
+"""
+Simple (non well-balanced) bathymetry source, scaled by Δt:
+    m_t += - g h b_x
+"""
+function bathy_source!(hout, mout, x, dt_dx, bfun)
+    b  = bfun(x)
+    dx = x[2] - x[1]
+    dt = dt_dx * dx
+
     dbdx = similar(b)
-    dbdx[1] = (b[2]-b[1]) / dx
-    dbdx[end] = (b[end]-b[end-1]) / dx
-    @inbounds for i in 2:length(b)-1
-        dbdx[i] = (b[i+1]-b[i-1]) / (2*dx)   # FIX: 2*dx (not 2dx)
+    @inbounds begin
+        dbdx[1]    = (b[2]   - b[1])     / dx
+        dbdx[end]  = (b[end] - b[end-1]) / dx
+        for i in 2:length(b)-1
+            dbdx[i] = (b[i+1] - b[i-1]) / (2*dx)
+        end
     end
-    # Add source term to momentum: m_t += - g h b_x
+
     @inbounds for i in eachindex(hout)
-        mout[i] -= g * hout[i] * dbdx[i]
+        mout[i] -= dt * g * hout[i] * dbdx[i]
+    end
+end
+
+"""
+Well-balanced bathymetry source (hydrostatic reconstruction) that
+preserves η=const, u=0 exactly on uneven bottoms.
+"""
+function bathy_source_wb!(hout, mout, x, dt_dx, bfun)
+    b  = bfun(x)
+    dx = x[2] - x[1]
+    dt = dt_dx * dx
+
+    η = hout .+ b
+    N = length(hout)
+    hstar = zeros(eltype(hout), N+1)
+
+    @inbounds begin
+        # left interface
+        bL=b[1]; ηL=η[1]; bR=b[1]; ηR=η[1]
+        bmax = max(bL,bR)
+        hstar[1] = min(max(0.0, ηL-bmax), max(0.0, ηR-bmax))
+
+        # interior interfaces
+        for i in 1:N-1
+            bL=b[i]; ηL=η[i]; bR=b[i+1]; ηR=η[i+1]
+            bmax = max(bL,bR)
+            hstar[i+1] = min(max(0.0, ηL-bmax), max(0.0, ηR-bmax))
+        end
+
+        # right interface
+        bL=b[end]; ηL=η[end]; bR=b[end]; ηR=η[end]
+        bmax = max(bL,bR)
+        hstar[end] = min(max(0.0, ηL-bmax), max(0.0, ηR-bmax))
+    end
+
+    @inbounds for i in 1:N
+        S = -0.5 * g * (hstar[i+1]^2 - hstar[i]^2) / dx
+        mout[i] += dt * S
     end
 end
 
@@ -154,8 +200,10 @@ function build_fluxes_reflective!(Fhat, h, m; limiter::Symbol=:mc, solver::Symbo
 end
 
 # ------------------ Euler step (reflective) ----------------
-@inline function euler_step_reflective!(hout, mout, h, m, Fhat, dt_dx, x, t,
-                                        source_fun, bfun=default_bathymetry)
+@inline function euler_step_reflective!(
+    hout, mout, h, m, Fhat, dt_dx, x, t,
+    source_fun, bfun=default_bathymetry; well_balanced::Bool=false
+)
     inds = axes(h,1); fi = firstindex(h)
     offset = first(axes(Fhat,1)) - fi
     @inbounds for i in inds
@@ -165,9 +213,19 @@ end
         mout[i] = m[i] - dt_dx*(Fhat[kR,2] - Fhat[kL,2])
     end
 
-    # user source + bathymetry source
+    # user source (if any)
     source_fun(hout, mout, x, t)
-    bathy_source!(hout, mout, x, t, bfun)
+
+    # bathymetry source (Δt-scaled)
+    if bfun === default_bathymetry
+        # flat -> zero; skip for a tiny speedup
+    else
+        if well_balanced
+            bathy_source_wb!(hout, mout, x, dt_dx, bfun)
+        else
+            bathy_source!(hout, mout, x, dt_dx, bfun)
+        end
+    end
 
     # positivity / dry fix
     @inbounds for i in inds
@@ -195,11 +253,14 @@ default_source_zero(h, m, x, t) = nothing
 
 """
     sw_muscl_hll(N, L, T; CFL=0.4, limiter=:mc, solver=:hll,
-                 ic_fun=default_ic_sine, source_fun=default_source_zero, bfun=default_bathymetry)
+                 ic_fun=default_ic_sine, source_fun=default_source_zero,
+                 bfun=default_bathymetry, well_balanced=false)
+
+Advance to time T and return (x, h, m).
 """
 function sw_muscl_hll(N, L, T; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=:hll,
                       ic_fun=default_ic_sine, source_fun=default_source_zero,
-                      bfun=default_bathymetry)
+                      bfun=default_bathymetry, well_balanced::Bool=false)
     dx = L/N
     x  = @. (0.5:1:N-0.5) * dx
 
@@ -217,9 +278,9 @@ function sw_muscl_hll(N, L, T; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=:hll
         dt = (amax > 0) ? min(CFL*dx/amax, T - t) : (T - t)
         dt_dx = dt/dx
 
-        euler_step_reflective!(h1,m1, h,m, Fhat, dt_dx, x, t, source_fun, bfun)
+        euler_step_reflective!(h1,m1, h,m, Fhat, dt_dx, x, t, source_fun, bfun; well_balanced)
         _ = build_fluxes_reflective!(Fhat, h1,m1; limiter=limiter, solver=solver)
-        euler_step_reflective!(h2,m2, h1,m1, Fhat, dt_dx, x, t+dt, source_fun, bfun)
+        euler_step_reflective!(h2,m2, h1,m1, Fhat, dt_dx, x, t+dt, source_fun, bfun; well_balanced)
 
         @inbounds for i in eachindex(h)
             h[i] = 0.5*(h[i] + h2[i])
@@ -232,7 +293,7 @@ end
 
 function sw_snapshots(N, L, times; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=:hll,
                       ic_fun=default_ic_sine, source_fun=default_source_zero,
-                      bfun=default_bathymetry)
+                      bfun=default_bathymetry, well_balanced::Bool=false)
     dx = L/N
     x  = @. (0.5:1:N-0.5) * dx
 
@@ -259,9 +320,9 @@ function sw_snapshots(N, L, times; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=
             dt = (amax > 0) ? min(CFL*dx/amax, target - t) : (target - t)
             dt_dx = dt/dx
 
-            euler_step_reflective!(h1,m1, h,m, Fhat, dt_dx, x, t, source_fun, bfun)
+            euler_step_reflective!(h1,m1, h,m, Fhat, dt_dx, x, t,    source_fun, bfun; well_balanced)
             _ = build_fluxes_reflective!(Fhat, h1, m1; limiter=limiter, solver=solver)
-            euler_step_reflective!(h2,m2, h1,m1, Fhat, dt_dx, x, t+dt, source_fun, bfun)
+            euler_step_reflective!(h2,m2, h1,m1, Fhat, dt_dx, x, t+dt, source_fun, bfun; well_balanced)
 
             @inbounds for i in eachindex(h)
                 h[i] = 0.5*(h[i] + h2[i])
@@ -277,12 +338,14 @@ end
 
 function animate_sw(N, L, T; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=:hll,
                     ic_fun=default_ic_sine, source_fun=default_source_zero, bfun=default_bathymetry,
+                    well_balanced::Bool=false,
                     fps::Integer=30, ylim_h=(0.0,2.0), ylim_u=(-2.0,2.0),
                     path::AbstractString="shallow_water.gif")
     x, h, m = sw_muscl_hll(N, L, 0.0; CFL=CFL, limiter=limiter, solver=solver,
-                           ic_fun=ic_fun, source_fun=source_fun, bfun=bfun)
-    anim = Animation()
+                           ic_fun=ic_fun, source_fun=source_fun, bfun=bfun, well_balanced=well_balanced)
+    b = bfun(x)  # zero if default
 
+    anim = Animation()
     t = 0.0
     dx = L/N
     Fhat = zeros(eltype(h), length(h)+1, 2)
@@ -290,9 +353,12 @@ function animate_sw(N, L, T; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=:hll,
     h2 = similar(h); m2 = similar(h)
 
     while t < T - eps()
-        # frame
+        # frame (plot η & b on top, u at bottom)
         u = similar(h); @inbounds for i in eachindex(h); u[i] = (h[i] > HMIN) ? m[i]/h[i] : 0.0; end
-        p1 = plot(x, h, xlabel="x", ylabel="h", ylim=ylim_h, label=false, title="t=$(round(t,digits=3))")
+        η = h .+ b
+        p1 = plot(x, η, xlabel="x", ylabel="elevation", ylim=ylim_h, label="η=h+b",
+                  title="t=$(round(t,digits=3))")
+        plot!(p1, x, b, label="b(x)", ls=:dash)
         p2 = plot(x, u, xlabel="x", ylabel="u", ylim=ylim_u, label=false)
         frame(anim, plot(p1, p2, layout=(2,1)))
 
@@ -301,9 +367,9 @@ function animate_sw(N, L, T; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=:hll,
         dt = (amax > 0) ? min(CFL*dx/amax, T - t) : (T - t)
         dt_dx = dt/dx
 
-        euler_step_reflective!(h1,m1, h,m, Fhat, dt_dx, x, t, source_fun, bfun)
+        euler_step_reflective!(h1,m1, h,m, Fhat, dt_dx, x, t, source_fun, bfun; well_balanced)
         _ = build_fluxes_reflective!(Fhat, h1, m1; limiter=limiter, solver=solver)
-        euler_step_reflective!(h2,m2, h1,m1, Fhat, dt_dx, x, t+dt, source_fun, bfun)
+        euler_step_reflective!(h2,m2, h1,m1, Fhat, dt_dx, x, t+dt, source_fun, bfun; well_balanced)
 
         @inbounds for i in eachindex(h)
             h[i] = 0.5*(h[i] + h2[i])

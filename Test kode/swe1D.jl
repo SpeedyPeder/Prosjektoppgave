@@ -11,27 +11,18 @@ using Printf
 N, L = 100, 5.0
 CFL  = 0.45
 T    = 1.0
-lim  = :mc
-solver = :hll
+lim  = :mc           # or :minmod
+solver = :hll        # or :rusanov
 x0   = 0.5L
 
 hl, hr = 1.0, 0.2
 times = 0.0:0.1:T
 
-# ---------------- Bathymetry ----------------
-# bfun(x) = zeros(length(x))                            
-# bfun(x) = @. 0.25 * exp(-((x - 0.7*L)^2) / (0.05*L)^2) 
-#bfun(x) = [xi < 0.6L ? 0.0 : 0.15 for xi in x]        
-bfun(x) = @. 0.12*(x/L) + (x > 0.7L ? 0.08 : 0.0)
-# bfun(x) = @. 0.18 * exp(-((x - 0.72L)^2) / (0.06L)^2)
-# bfun(x) = @. (x > 0.55L ? 0.07 : 0.0) + (x > 0.82L ? 0.05 : 0.0)
-
-
-# ---------------- Initial condition ----------------
+# ---------------- Initial condition (flat bottom, dam break) ----------------
 ic_fun(x) = ( [xi < x0 ? hl : hr for xi in x], zeros(length(x)) )
-source_fun = sweSim1D.default_source_zero
+source_fun = sweSim1D.default_source_zero   # no extra forcing
 
-# --------- Trim times before reflections ---------
+# --------- Non-reflection window for analytic comparison ---------
 g   = sweSim1D.g
 cL  = sqrt(g*hl)
 hm  = DambreakAnalytic.solve_hm(hl, hr; g=g)
@@ -46,30 +37,20 @@ if maximum(times) > tmax
 end
 
 # ---------------- Final state (numeric) ----------------
-if @isdefined(bfun)
-    x, h, m = sweSim1D.sw_muscl_hll(N, L, T; CFL=CFL, limiter=lim,
-                                    solver=solver, ic_fun=ic_fun,
-                                    source_fun=source_fun, bfun=bfun)
-    b = bfun(x)
-else
-    x, h, m = sweSim1D.sw_muscl_hll(N, L, T; CFL=CFL, limiter=lim,
-                                    solver=solver, ic_fun=ic_fun,
-                                    source_fun=source_fun)
-    b = zeros(length(x))
-end
+x, h, m = sweSim1D.sw_muscl_hll(N, L, T; CFL=CFL, limiter=lim,
+                                solver=solver, ic_fun=ic_fun,
+                                source_fun=source_fun)   # no bfun -> flat
 
 HMIN = hasproperty(sweSim1D, :HMIN) ? sweSim1D.HMIN : 1e-8
 u = ifelse.(h .> HMIN, m ./ h, 0.0)
 
-# ---------------- Plot water surface vs bathymetry ----------------
-η = h .+ b   # free surface elevation
-p1 = plot(x, η, lw=2, label="water surface", xlabel="x", ylabel="elevation")
-plot!(p1, x, b, lw=2, ls=:dash, c=:brown, label="bathymetry")
-p2 = plot(x, u, xlabel="x", ylabel="u", label="velocity u")
+# ---------------- Plot h and u ----------------
+p1 = plot(x, h, lw=2, label="numeric h(t=$T)", xlabel="x", ylabel="h")
+p2 = plot(x, u, lw=2, label="numeric u(t=$T)", xlabel="x", ylabel="u")
 display(plot(p1, p2, layout=(2,1), size=(900,600)))
 
-# ------------- Numeric vs Analytic (only if flat bottom) -------------
-if !@isdefined(bfun) && T ≤ tmax - eps()
+# ------------- Numeric vs Analytic (flat bottom only) -------------
+if T ≤ tmax - eps()
     h_ex, u_ex = DambreakAnalytic.stoker_solution(x, T; hl=hl, hr=hr, x0=x0, g=g)
 
     e_h = h .- h_ex
@@ -82,51 +63,33 @@ if !@isdefined(bfun) && T ≤ tmax - eps()
     @printf("  h:  L1=%.4e  L2=%.4e  Linf=%.4e\n", L1(e_h), L2(e_h), Linf(e_h))
     @printf("  u:  L1=%.4e  L2=%.4e  Linf=%.4e\n", L1(e_u), L2(e_u), Linf(e_u))
 
-    q1 = plot(x, h_ex, lw=3, label="analytic h", xlabel="x", ylabel="h", title="t=$(round(T,digits=3))")
-    plot!(q1, x, h,   lw=1.8, ls=:dash, label="numeric h")
+    q1 = plot(x, h_ex, lw=3, label="analytic h", xlabel="x", ylabel="h",
+              title="Dambreak: t=$(round(T,digits=3)) (flat bottom)")
+    plot!(q1, x, h,   lw=2, ls=:dash, label="numeric h")
+
     q2 = plot(x, u_ex, lw=3, label="analytic u", xlabel="x", ylabel="u")
-    plot!(q2, x, u,    lw=1.8, ls=:dash, label="numeric u")
+    plot!(q2, x, u,    lw=2, ls=:dash, label="numeric u")
+
     display(plot(q1, q2, layout=(2,1), size=(900,600)))
-elseif @isdefined(bfun)
-    @info "Analytic solution disabled (bathymetry present)."
 else
-    @info "Skipping analytic overlay at T=$T (waves reached boundaries)."
+    @info "Skipping analytic overlay at T=$T (waves reached boundaries, tmax=$(round(tmax,digits=3)))."
 end
 
-# ------------- Snapshots -------------
-if @isdefined(bfun)
-    x_snap, snaps = sweSim1D.sw_snapshots(N, L, valid_times; CFL=CFL,
-                                          limiter=lim, solver=solver,
-                                          ic_fun=ic_fun, source_fun=source_fun)
-    b_snap = bfun(x_snap)
-else
-    x_snap, snaps = sweSim1D.sw_snapshots(N, L, valid_times; CFL=CFL,
-                                          limiter=lim, solver=solver,
-                                          ic_fun=ic_fun, source_fun=source_fun)
-    b_snap = zeros(length(x_snap))
-end
+# ------------- Snapshots (with analytic overlays while valid) -------------
+x_snap, snaps = sweSim1D.sw_snapshots(N, L, valid_times; CFL=CFL, limiter=lim,
+                                      solver=solver, ic_fun=ic_fun, source_fun=source_fun)
 
-plt = plot(xlabel="x", ylabel="h", legend=:topright, title="Shallow water snapshots")
+plt = plot(xlabel="x", ylabel="h", legend=:topright, title="Shallow water snapshots (flat bottom)")
 for t in valid_times
     hT, mT = snaps[t]
-    ηT = hT .+ b_snap
-    plot!(plt, x_snap, ηT,  lw=1.5, ls=:dash, label="η num t=$(round(t,digits=2))")
-    if !@isdefined(bfun)
-        h_ex, _ = DambreakAnalytic.stoker_solution(x_snap, t; hl=hl, hr=hr, x0=x0, g=g)
-        plot!(plt, x_snap, h_ex, lw=2.5, label="h exact t=$(round(t,digits=2))")
-    end
+    plot!(plt, x_snap, hT,  lw=1.6, ls=:dash, label="h num t=$(round(t,digits=2))")
+    h_ex, _ = DambreakAnalytic.stoker_solution(x_snap, t; hl=hl, hr=hr, x0=x0, g=g)
+    plot!(plt, x_snap, h_ex, lw=2.2, label="h exact t=$(round(t,digits=2))")
 end
-plot!(plt, x_snap, b_snap, lw=2, ls=:dashdot, c=:brown, label="bathymetry")
 display(plt)
 
 # ------------- Animation (numeric) -------------
 gifpath = joinpath(@__DIR__, "shallow_water.gif")
-if @isdefined(bfun)
-    _ = sweSim1D.animate_sw(N, L, T; CFL=CFL, limiter=lim, solver=solver,
-                            ic_fun=ic_fun, source_fun=source_fun, bfun=bfun, path=gifpath)
-else
-    _ = sweSim1D.animate_sw(N, L, T; CFL=CFL, limiter=lim, solver=solver,
-                            ic_fun=ic_fun, source_fun=source_fun, path=gifpath)
-end
+_ = sweSim1D.animate_sw(N, L, T; CFL=CFL, limiter=lim, solver=solver,
+                        ic_fun=ic_fun, source_fun=source_fun, path=gifpath)
 println("Saved animation to: $gifpath")
-

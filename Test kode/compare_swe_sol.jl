@@ -10,7 +10,7 @@ using Printf
 # ---------------- Params ----------------
 N, L = 400, 5.0
 CFL  = 0.45
-T    = 1.0                  # used for static plots below; animation will stop earlier
+T    = 1.0                  # used for static plots; animation stops earlier
 lim  = :mc
 solver = :hll
 x0   = 0.5L
@@ -43,7 +43,7 @@ x, h, m = sweSim1D.sw_muscl_hll(N, L, T; CFL=CFL, limiter=lim, solver=solver,
 HMIN = hasproperty(sweSim1D, :HMIN) ? sweSim1D.HMIN : 1e-8
 u = ifelse.(h .> HMIN, m ./ h, 0.0)
 
-# Two-panel plot instead of yaxis=:right (avoids backend warning)
+# Two-panel plot
 p1 = plot(x, h, xlabel="x", ylabel="h", label="numeric h(t=$T)")
 p2 = plot(x, u, xlabel="x", ylabel="u", label="numeric u(t=$T)")
 display(plot(p1, p2, layout=(2,1), size=(900,600)))
@@ -124,7 +124,7 @@ function animate_compare(N, L; x0, hl, hr, CFL=0.45, limiter=:mc, solver=:hll,
 
         frame(anim, plot(p1, p2, layout=(2,1), size=(900,600)))
 
-        # --- advance one SSPRK2 step (same numerics as your animate_sw)
+        # --- advance one SSPRK2 step
         amax = sweSim1D.build_fluxes_reflective!(Fhat, h, m; limiter=limiter, solver=solver)
         dt = (amax > 0) ? min(CFL*dx/amax, Tend - t) : (Tend - t)
         dt_dx = dt/dx
