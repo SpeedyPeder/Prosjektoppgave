@@ -84,7 +84,7 @@ for t in valid_times
 end
 display(plt)
 
-# ------------- NEW: Animation (numeric + analytic, up to 0.5 s and before walls) -------------
+# ------------- Animation (numeric + analytic, up to 0.5 s and before walls) -------------
 function animate_compare(N, L; x0, hl, hr, CFL=0.45, limiter=:mc, solver=:hll,
                          Tstop=0.5, fps=30, path="compare_dambreak.gif")
     # stop before reflections and at requested cap
@@ -102,7 +102,7 @@ function animate_compare(N, L; x0, hl, hr, CFL=0.45, limiter=:mc, solver=:hll,
     x, h, m = sweSim1D.sw_muscl_hll(N, L, 0.0; CFL=CFL, limiter=limiter, solver=solver,
                                     ic_fun=ic, source_fun=sweSim1D.default_source_zero)
 
-    # work buffers (reuse every step)
+    # storage for fluxes and RK stages
     Fhat = zeros(eltype(h), length(h)+1, 2)
     h1 = similar(h); m1 = similar(h)
     h2 = similar(h); m2 = similar(h)
@@ -147,7 +147,7 @@ gif_comp = animate_compare(N, L; x0=x0, hl=hl, hr=hr, CFL=CFL, limiter=lim, solv
                            Tstop=0.5, fps=30, path=joinpath(@__DIR__, "compare_dambreak.gif"))
 println("Saved comparison animation to: $gif_comp")
 
-# (still produce the numeric-only animation if you want)
+# ------------- Animation (numeric only, full domain) -------------
 gifpath = joinpath(@__DIR__, "shallow_water.gif")
 _ = sweSim1D.animate_sw(N, L, T; CFL=CFL, limiter=lim, solver=solver,
                         ic_fun=ic_fun, source_fun=source_fun, path=gifpath)
