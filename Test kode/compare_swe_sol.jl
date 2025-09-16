@@ -8,9 +8,9 @@ using Plots
 using Printf
 
 # ---------------- Params ----------------
-N, L = 400, 5.0
+N, L = 100, 5.0
 CFL  = 0.45
-T    = 1.0                  # used for static plots; animation stops earlier
+T    = 1.0                  
 lim  = :mc
 solver = :hll
 x0   = 0.5L
