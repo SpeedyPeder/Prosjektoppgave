@@ -9,7 +9,7 @@ using Printf
 N, L = 100, 5.0
 CFL  = 0.45
 T    = 1.0
-lim  = :mc
+lim  = :minmod
 solver = :hll
 times = 0.0:0.1:T   # snapshot times
 
@@ -38,7 +38,7 @@ source_fun = sweSim1D.default_source_zero
 # ---------------- Final state (numeric) ----------------
 x, h, m = sweSim1D.sw_muscl_hll(N, L, T; CFL=CFL, limiter=lim, solver=solver,
                                 ic_fun=ic_fun, source_fun=source_fun,
-                                bfun=bfun, well_balanced=false)  # WB recommended with bathymetry
+                                bfun=bfun, well_balanced=true)  # WB recommended with bathymetry
 
 HMIN = hasproperty(sweSim1D, :HMIN) ? sweSim1D.HMIN : 1e-8
 u = ifelse.(h .> HMIN, m ./ h, 0.0)
@@ -55,7 +55,7 @@ display(plot(p1, p2, layout=(2,1), size=(950,650)))
 # ---------------- Snapshots (numeric only) ----------------
 x_snap, snaps = sweSim1D.sw_snapshots(N, L, times; CFL=CFL, limiter=lim, solver=solver,
                                       ic_fun=ic_fun, source_fun=source_fun,
-                                      bfun=bfun, well_balanced= false)
+                                      bfun=bfun, well_balanced= true)
 b_snap = bfun(x_snap)
 
 plt = plot(xlabel="x", ylabel="elevation", legend=:topright,
@@ -72,7 +72,7 @@ display(plt)
 gifpath = joinpath(@__DIR__, "shallow_water_bathy.gif")
 _ = sweSim1D.animate_sw(N, L, T; CFL=CFL, limiter=lim, solver=solver,
                         ic_fun=ic_fun, source_fun=source_fun,
-                        bfun=bfun, well_balanced=false,
+                        bfun=bfun, well_balanced=true,
                         path=gifpath)
 println("Saved animation to: $gifpath")
 
