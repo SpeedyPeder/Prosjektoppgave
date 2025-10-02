@@ -53,7 +53,7 @@ function burgers_fd_lw(N::Int, L::Float64, T::Float64; CFL::Float64=0.95)
     dx = L/N
     x  = @. (0.5:1:N-0.5) * dx
     u  = initial_condition.(x)
-    u1 = similar(u)           # stage
+    u1 = similar(u)          # predictor
     f  = similar(u)
     fi, li = firstindex(u), lastindex(u)
 
@@ -66,7 +66,7 @@ function burgers_fd_lw(N::Int, L::Float64, T::Float64; CFL::Float64=0.95)
 
         @inbounds for i in eachindex(u); f[i] = flux(u[i]); end
 
-        # Predictor (forward Euler using centered space)
+        # Predictor step
         @inbounds for i in eachindex(u)
             im = previdx(i, fi, li)
             ip = nextidx(i, fi, li)
