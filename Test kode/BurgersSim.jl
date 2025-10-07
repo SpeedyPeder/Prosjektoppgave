@@ -42,7 +42,7 @@ end
         elseif uR <= 0
             return flux(uR)
         else
-            return 0.0                 # fan straddles 0
+            return 0.0           # rarefaction fan contains 0
         end
     end
 end
@@ -203,5 +203,125 @@ function animate_burgers(N, L, T; CFL::Float64=0.45, limiter::Symbol=:mc,
     gif(anim, path, fps=fps)
     return x, u
 end
+
+# ---------- Additional numerical flux builders ----------
+
+# First-order Godunov (upwind for Burgers) using piecewise-constant states
+function build_fluxes_godunov_firstorder!(fhat, u)
+    inds = axes(u, 1); fi, li = firstindex(u), lastindex(u)
+    amax = 0.0
+    @inbounds for i in inds
+        ip = (i == li) ? fi : i + 1
+        uL = u[i]
+        uR = u[ip]
+        fhat[i] = godunov_flux_burgers(uL, uR)
+        amax = max(amax, abs(uL), abs(uR))
+    end
+    return amax
+end
+
+# Lax–Friedrichs (Rusanov) flux with global alpha = max |u|
+function build_fluxes_lax_friedrichs!(fhat, u)
+    inds = axes(u, 1); fi, li = firstindex(u), lastindex(u)
+    amax = 0.0
+    @inbounds for i in inds
+        amax = max(amax, abs(u[i]))
+    end
+    @inbounds for i in inds
+        ip = (i == li) ? fi : i + 1
+        uL = u[i]
+        uR = u[ip]
+        fhat[i] = 0.5*(flux(uL) + flux(uR)) - 0.5*amax*(uR - uL)
+    end
+    return amax
+end
+
+# Lax–Wendroff (Richtmyer 2-step)
+function build_fluxes_lax_wendroff!(fhat, u, dt_dx)
+    inds = axes(u, 1); fi, li = firstindex(u), lastindex(u)
+    amax = 0.0
+    @inbounds for i in inds
+        ip = (i == li) ? fi : i + 1
+        u_half = 0.5*(u[i] + u[ip]) - 0.5*dt_dx*(flux(u[ip]) - flux(u[i]))
+        fhat[i] = flux(u_half)
+        amax = max(amax, abs(u[i]), abs(u[ip]), abs(u_half))
+    end
+    return amax
+end
+
+# ---------- Drivers ----------
+
+function burgers_upwind_godunov(N, L, T; CFL::Float64=0.45)
+    dx = L/N
+    x  = @. (0.5:1:N-0.5) * dx
+    u  = initial_condition.(x)
+    fhat = similar(u); u1 = similar(u)
+
+    t = 0.0
+    while t < T - eps()
+        amax = build_fluxes_godunov_firstorder!(fhat, u)
+        dt = (amax > 0) ? min(CFL*dx/amax, T - t) : (T - t)
+        euler_step!(u1, u, fhat, dt/dx)
+        u, u1 = u1, u
+        t += dt
+    end
+    return x, u
+end
+
+function burgers_lax_friedrichs(N, L, T; CFL::Float64=0.45)
+    dx = L/N
+    x  = @. (0.5:1:N-0.5) * dx
+    u  = initial_condition.(x)
+    fhat = similar(u); u1 = similar(u)
+
+    t = 0.0
+    while t < T - eps()
+        amax = build_fluxes_lax_friedrichs!(fhat, u)
+        dt = (amax > 0) ? min(CFL*dx/amax, T - t) : (T - t)
+        euler_step!(u1, u, fhat, dt/dx)
+        u, u1 = u1, u
+        t += dt
+    end
+    return x, u
+end
+
+function burgers_lax_wendroff(N, L, T; CFL::Float64=0.45)
+    dx = L/N
+    x  = @. (0.5:1:N-0.5) * dx
+    u  = initial_condition.(x)
+    fhat = similar(u); u1 = similar(u)
+
+    t = 0.0
+    while t < T - eps()
+        a_guess = maximum(abs, u)
+        dt = (a_guess > 0) ? min(CFL*dx/a_guess, T - t) : (T - t)
+        dt_dx = dt/dx
+        _ = build_fluxes_lax_wendroff!(fhat, u, dt_dx)
+        euler_step!(u1, u, fhat, dt_dx)
+        u, u1 = u1, u
+        t += dt
+    end
+    return x, u
+end
+
+"""
+    burgers_compare_at(N, L, T; CFL=0.45, limiter=:mc)
+
+Return (x, Dict{String,Vector}) of solutions from several schemes at time T.
+"""
+function burgers_compare_at(N, L, T; CFL::Float64=0.45, limiter::Symbol=:mc)
+    x1, u_up   = burgers_upwind_godunov(N, L, T; CFL=CFL)
+    x2, u_lf   = burgers_lax_friedrichs(N, L, T; CFL=CFL)
+    #x3, u_lw   = burgers_lax_wendroff(N, L, T; CFL=CFL)
+    x4, u_mg   = burgers_muscl_godunov(N, L, T; CFL=CFL, limiter=limiter)
+    results = Dict(
+        "Upwind/Godunov (1st)" => u_up,
+        "Lax–Friedrichs (1st)" => u_lf,
+        #"Lax–Wendroff (2nd)"   => u_lw,
+        "MUSCL–Godunov (TVD)"  => u_mg,
+    )
+    return x1, results
+end
+
 
 end # module
