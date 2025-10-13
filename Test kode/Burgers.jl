@@ -1,31 +1,54 @@
-cd(@__DIR__)                  # save outputs in this script’s folder
+"""
+cd(@__DIR__)
 include("BurgersSim.jl")
-using .BurgersSim           
-
+using .BurgersSim
 using Plots
 
-# --- Parameters (edit here) ---
-N, L = 400, 1.0
+# --- Parameters ---
+N, L = 100, 1.0
 CFL  = 0.45
-T    = 1.0
+T    = 0.1
 lim  = :mc
-times = 0:0.1:T               # snapshots every 0.1 s
 
-# --- Final state at T ---
-x, uT = BurgersSim.burgers_muscl_godunov(N, L, T; CFL=CFL, limiter=lim)
-plot(x, uT, xlabel="x", ylabel="u", label="t=$T", legend=:bottomright)
-display(current())
+# Top-hat IC: u=1 on [0,0.1), u=0 elsewhere (periodic)
+ic_box = x -> BurgersSim.initial_condition_tophat(x; a=0.0, b=0.1, u_in=1.0, u_out=0.0, L=L)
 
-# --- Snapshots (overlay) ---
-x, snaps = BurgersSim.burgers_snapshots(N, L, times; CFL=CFL, limiter=lim)
-plt = plot(xlabel="x", ylabel="u", legend=:bottomright, title="Snapshots every 0.1 s")
-for t in times
-    plot!(plt, x, snaps[t], label="t=$(t)")
+# --- Compare schemes at time T ---
+x, sols = BurgersSim.burgers_compare_at(N, L, T; CFL=CFL, limiter=lim, ic=ic_box)
+
+plt = plot(xlabel="x", ylabel="u", title="Burgers (box IC) at t=$(T)", legend=:bottomright)
+for (lab, u) in sols
+    scatter!(plt, x, u; label=lab, ms=3, m=:circle)
 end
 display(plt)
-# savefig(plt, "burgers_snapshots.png")
+"""
 
-# --- Animation (GIF) ---
-gifpath = joinpath(@__DIR__, "burgers.gif")
-_ = BurgersSim.animate_burgers(N, L, T; CFL=CFL, limiter=lim, fps=30, path=gifpath)
+cd(@__DIR__)
+include("BurgersSim.jl")
+using .BurgersSim
+using Plots
 
+# --- Parameters ---
+N, L  = 400, 1.0
+CFL   = 0.45
+T     = 0.20                 # any t>0 works; periodic wrap is handled
+uL,uR = 1.0, 0.0             # shock case; set uL<uR to test rarefaction
+x0    = 0.35
+lim   = :mc
+
+# --- Run & compare ---
+x, sols, u_exact = BurgersSim.burgers_compare_vs_exact(N, L, T;
+    CFL=CFL, limiter=lim, uL=uL, uR=uR, x0=x0)
+
+# Overlay: exact line + scheme dots
+plt = plot(x, u_exact; lw=2, label="Exact", xlabel="x", ylabel="u",
+           title="Burgers Riemann: t=$(T), uL=$(uL), uR=$(uR)")
+for (lab, u) in sols
+    scatter!(plt, x, u; label=lab, ms=3, m=:circle)
+end
+display(plt)
+
+# Optional zoom near discontinuity (shock when uL>uR, rarefaction head/tail when uL<uR)
+# if uL>uR
+#   s = 0.5*(uL+uR); xshock = mod(x0 + s*T, L)
+#   xlims!(plt, xshock-0.1, xshock+0.1); display(plt)
