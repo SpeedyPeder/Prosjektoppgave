@@ -3,31 +3,30 @@ module BurgersSim
 using Plots
 
 # --- Physics ---
-flux(u) = 0.5u^2
-initial_condition(x) = sin(2π*x)
-
-# --- Limiters ---
-@inline function minmod2(a, b)
-    (a*b <= 0) && return 0.0
-    s = sign(a)
-    return s * min(abs(a), abs(b))
+flux(u) = 0.5*u^2
+function initial_condition(x)
+    return  (0.0 <= x && x <= 0.1) ? 1.0 : 0.0 #IC1
+    #return sin(2π*x)                          #IC2
 end
 
-@inline function minmod3(a, b, c)
-    s = sign(a)
-    (sign(b) != s || sign(c) != s) && return 0.0
-    return s * min(abs(a), abs(b), abs(c))
+# === Exact solution for IC1 ========================================
+analytic_burgers_pulse_outflow(x::AbstractVector, T; xR=0.1, uL=1.0, uR=0.0) = begin
+    xs = xR + 0.5*(uL + uR)*T     # = xR + 0.5*T
+    @. x < xs ? uL : uR
 end
 
-@inline function slope_limited(um, u0, up; limiter::Symbol = :mc)
-    a = u0 - um
-    b = up - u0
-    if limiter === :minmod
-        return minmod2(a, b)
-    elseif limiter === :mc
-        return minmod3(0.5*(a+b), 2a, 2b)
+# === Flux limiter function ===============================================
+function flux_limiter(r::Float64, limiter::Symbol)
+    if limiter == :minmod
+        return max(0.0, min(1.0, r))
+    elseif limiter == :mc
+        return max(0.0, min(2r, (1+r)/2, 2))
+    elseif limiter == :superbee
+        return max(0.0, min(2r, 1.0), min(r, 2.0))
+    elseif limiter == :vanleer
+        return (r + abs(r)) / (1 + abs(r))
     else
-        error("Unknown limiter $limiter. Use :mc or :minmod.")
+        error("Unknown limiter: $limiter")
     end
 end
 
@@ -47,35 +46,44 @@ end
     end
 end
 
-# Build numerical interface fluxes with MUSCL reconstruction (periodic)
+function fill_ghosts_outflow!(u)
+    # left boundary (x=0): copy first interior value
+    u[2] = u[3]
+    u[1] = u[3]
+    # right boundary (x=L): copy last interior value
+    u[end-1] = u[end-2]
+    u[end]   = u[end-2]
+    return nothing
+end
+
+# Build numerical interface fluxes with MUSCL reconstruction (periodic, upwind interface r)
 function build_fluxes!(fhat, u; limiter::Symbol = :mc)
-    slopes = similar(u)
-    inds = axes(u, 1)
-    fi, li = firstindex(u), lastindex(u)
+    @assert length(fhat) == length(u)
+    ε = 1e-14
+    UL = similar(u); UR = similar(u)
+    @inbounds for i in 2:length(u)-3
+        im1 = i-1; ip1 = i+1; ip2 = i+2
 
-    @inbounds for i in inds
-        im = (i == fi) ? li : i - 1
-        ip = (i == li) ? fi : i + 1
-        slopes[i] = slope_limited(u[im], u[i], u[ip]; limiter = limiter)
+        a_int = 0.5*(u[i] + u[ip1]) 
+        # upwind, interface-based Sweby ratio
+        r = (a_int >= 0.0) ?
+            (u[i]   - u[im1]) / ((u[ip1] - u[i]) + ε) :
+            (u[ip2] - u[ip1]) / ((u[ip1] - u[i]) + ε)
+        ϕ = flux_limiter(r, limiter)
+
+        # MUSCL reconstruction at i+1/2
+        UL[i] = u[i]   + 0.5*ϕ*(u[i]   - u[im1])
+        UR[i] = u[ip1] - 0.5*ϕ*(u[ip2] - u[ip1])
+
+        fhat[i] = godunov_flux_burgers(UL[i], UR[i])
     end
 
-    amax = 0.0
-    @inbounds for i in inds
-        ip = (i == li) ? fi : i + 1
-        uL = u[i]  + 0.5*slopes[i]
-        uR = u[ip] - 0.5*slopes[ip]
-        fhat[i] = godunov_flux_burgers(uL, uR)
-        amax = max(amax, abs(uL), abs(uR), abs(u[i]))  # for CFL
-    end
-    return amax
+    return maximum(abs.(u[3:end-2]))  # CFL from interior
 end
 
 @inline function euler_step!(uout, u, fhat, dt_dx)
-    inds = axes(u, 1)
-    fi, li = firstindex(u), lastindex(u)
-    @inbounds for i in inds
-        im = (i == fi) ? li : i - 1
-        uout[i] = u[i] - dt_dx*(fhat[i] - fhat[im])
+    @inbounds for i in 3:length(u)-2
+        uout[i] = u[i] - dt_dx*(fhat[i] - fhat[i-1])
     end
 end
 
@@ -90,31 +98,36 @@ Returns (x, u) at t = T (x are cell centers).
 """
 function burgers_muscl_godunov(N, L, T; CFL::Float64 = 0.45, limiter::Symbol = :mc)
     dx = L / N
-    x  = @. (0.5:1:N-0.5) * dx
-    u  = initial_condition.(x)
+    x  = @. (0.5:1:N-0.5) * dx            # interior cell centers (for plotting)
 
-    fhat = similar(u)
+    u   = zeros(N+4)                      # add two ghost cells per side
+    u[3:N+2] .= initial_condition.(x)
+
+    fhat = zeros(N+4)
     u1   = similar(u)
     u2   = similar(u)
 
     t = 0.0
     while t < T - eps()
+        fill_ghosts_outflow!(u)
         amax = build_fluxes!(fhat, u; limiter = limiter)
-        dt = (amax > 0) ? CFL * dx / amax : (T - t)
-        dt = min(dt, T - t)
+        dt   = (amax > 0) ? min(CFL * dx / amax, T - t) : (T - t)
         dt_dx = dt / dx
 
         euler_step!(u1, u, fhat, dt_dx)
+
+        fill_ghosts_outflow!(u1)
         _ = build_fluxes!(fhat, u1; limiter = limiter)
         euler_step!(u2, u1, fhat, dt_dx)
 
-        @inbounds for i in eachindex(u)
-            u[i] = 0.5*(u[i] + u2[i])   # SSPRK2 combine
+        @inbounds for i in 3:length(u)-2
+            u[i] = 0.5*(u[i] + u2[i])     # SSPRK2 combine (interior only)
         end
 
         t += dt
     end
-    return x, u
+
+    return x, @view u[3:end-2]           # return interior solution
 end
 
 # ---------- Optional helpers (snapshots & animation) ----------
@@ -123,86 +136,101 @@ end
     burgers_snapshots(N, L, times; CFL=0.45, limiter=:mc)
 
 Return (x, Dict{Float64,Vector}) with solutions at requested times.
+Uses outflow (non-reflecting) BCs with two ghost cells per side.
 """
 function burgers_snapshots(N, L, times; CFL::Float64 = 0.45, limiter::Symbol = :mc)
     dx = L/N
-    x  = @. (0.5:1:N-0.5) * dx
-    u  = initial_condition.(x)
-    fhat = similar(u); u1 = similar(u); u2 = similar(u)
+    x  = @. (0.5:1:N-0.5) * dx                  # interior centers
+
+    # allocate with ghosts
+    u   = zeros(N+4)
+    u[3:N+2] .= initial_condition.(x)
+    fhat = zeros(N+4); u1 = similar(u); u2 = similar(u)
 
     times = sort(collect(times))
     results = Dict{Float64, Vector{Float64}}()
     t = 0.0
     if !isempty(times) && isapprox(times[1], 0.0; atol = 1e-15)
-        results[0.0] = copy(u)
+        results[0.0] = collect(u[3:end-2])      # store interior only
         times = times[2:end]
     end
 
     while !isempty(times)
         target = first(times)
         while t < target - eps()
+            fill_ghosts_outflow!(u)
             amax = build_fluxes!(fhat, u; limiter = limiter)
-            dt = (amax > 0) ? min(CFL*dx/amax, target - t) : (target - t)
+            dt   = (amax > 0) ? min(CFL*dx/amax, target - t) : (target - t)
             dt_dx = dt/dx
 
             euler_step!(u1, u, fhat, dt_dx)
+
+            fill_ghosts_outflow!(u1)
             _ = build_fluxes!(fhat, u1; limiter = limiter)
             euler_step!(u2, u1, fhat, dt_dx)
 
-            @inbounds for i in eachindex(u)
-                u[i] = 0.5*(u[i] + u2[i])
+            @inbounds for i in 3:length(u)-2
+                u[i] = 0.5*(u[i] + u2[i])       # SSPRK2 combine (interior)
             end
             t += dt
         end
-        results[target] = copy(u)
+        results[target] = collect(u[3:end-2])    # store interior
         times = times[2:end]
     end
     return x, results
 end
 
+
 """
     animate_burgers(N, L, T; CFL=0.45, limiter=:mc, fps=30, ylim=(-1.1,1.1), path="burgers_evolution.gif")
 
-Evolves and saves a GIF. Returns (x, uT).
+Evolves and saves a GIF. Returns (x, uT). Uses outflow BCs with ghosts.
 """
 function animate_burgers(N, L, T; CFL::Float64=0.45, limiter::Symbol=:mc,
                          fps::Integer=30, ylim=(-1.1,1.1),
                          path::AbstractString="burgers_evolution.gif")
     dx = L/N
-    x  = @. (0.5:1:N-0.5) * dx
-    u  = initial_condition.(x)
-    fhat = similar(u); u1 = similar(u); u2 = similar(u)
+    x  = @. (0.5:1:N-0.5) * dx                  # interior centers
+
+    # allocate with ghosts
+    u   = zeros(N+4)
+    u[3:N+2] .= initial_condition.(x)
+    fhat = zeros(N+4); u1 = similar(u); u2 = similar(u)
 
     t = 0.0
     anim = Animation()
 
-    # first frame
-    p = plot(x, u, xlabel="x", ylabel="u", ylim=ylim, label=false,
+    # first frame (plot interior only)
+    p = plot(x, u[3:end-2], xlabel="x", ylabel="u", ylim=ylim, label=false,
              title = "t = $(round(t, digits=3))")
     frame(anim, p)
 
     while t < T - eps()
+        fill_ghosts_outflow!(u)
         amax = build_fluxes!(fhat, u; limiter=limiter)
-        dt = (amax > 0) ? min(CFL*dx/amax, T - t) : (T - t)
+        dt   = (amax > 0) ? min(CFL*dx/amax, T - t) : (T - t)
         dt_dx = dt/dx
 
         euler_step!(u1, u, fhat, dt_dx)
+
+        fill_ghosts_outflow!(u1)
         _ = build_fluxes!(fhat, u1; limiter=limiter)
         euler_step!(u2, u1, fhat, dt_dx)
 
-        @inbounds for i in eachindex(u)
-            u[i] = 0.5*(u[i] + u2[i])
+        @inbounds for i in 3:length(u)-2
+            u[i] = 0.5*(u[i] + u2[i])           # SSPRK2 combine (interior)
         end
         t += dt
 
-        p = plot(x, u, xlabel="x", ylabel="u", ylim=ylim, label=false,
+        p = plot(x, u[3:end-2], xlabel="x", ylabel="u", ylim=ylim, label=false,
                  title = "t = $(round(t, digits=3))")
         frame(anim, p)
     end
 
     gif(anim, path, fps=fps)
-    return x, u
+    return x, u[3:end-2]
 end
+
 
 # ---------- Additional numerical flux builders ----------
 
@@ -312,49 +340,62 @@ Return (x, Dict{String,Vector}) of solutions from several schemes at time T.
 function burgers_compare_at(N, L, T; CFL::Float64=0.45, limiter::Symbol=:mc)
     x1, u_up   = burgers_upwind_godunov(N, L, T; CFL=CFL)
     x2, u_lf   = burgers_lax_friedrichs(N, L, T; CFL=CFL)
-    #x3, u_lw   = burgers_lax_wendroff(N, L, T; CFL=CFL)
+    x3, u_lw   = burgers_lax_wendroff(N, L, T; CFL=CFL)
     x4, u_mg   = burgers_muscl_godunov(N, L, T; CFL=CFL, limiter=limiter)
     results = Dict(
         "Upwind/Godunov (1st)" => u_up,
         "Lax–Friedrichs (1st)" => u_lf,
-        #"Lax–Wendroff (2nd)"   => u_lw,
+        "Lax–Wendroff (2nd)"   => u_lw,
         "MUSCL–Godunov (TVD)"  => u_mg,
     )
     return x1, results
 end
 
+#--------- Limiter comparison helper ----------
+function compare_limiters_zoom(
+        N::Int, L::Real, T::Real;
+        CFL=0.45,
+        limiters=[:minmod, :mc, :superbee, :vanleer],
+        shock_center=0.5, zoom_halfwidth=L/2,
+        do_plot::Bool=true)
 
-# --- Analytical (implicit) solution for smooth Burgers before shock ---
-function analytical_burgers(x, t; maxiter=50, tol=1e-10)
-    # u(x,t) = sin(2π(x - u t)) solved by fixed-point iteration
-    u = sin.(2π .* x)
-    for _ in 1:maxiter
-        u_new = @. sin(2π * (x - u * t))
-        if maximum(abs.(u_new .- u)) < tol
-            break
+    xs  = Dict{Symbol, Vector{Float64}}()
+    num = Dict{Symbol, Vector{Float64}}()
+
+    for lim in limiters
+        x, u = burgers_muscl_godunov(N, L, T; CFL=CFL, limiter=lim)
+        xs[lim]  = collect(x)
+        num[lim] = collect(u)
+    end
+
+    if do_plot
+        @eval using Plots
+        plt = plot(xlabel="x", ylabel="u",
+                   title="Limiter comparison near shock at x = $shock_center",
+                   legend=:topright, grid=false)
+
+        for (i, lim) in enumerate(limiters)
+            plot!(plt, xs[lim], num[lim];
+                  lw=2, label="Limiter: $lim",
+                  linestyle=[:solid, :dash, :dot, :dashdot][mod1(i,4)])
         end
-        u = u_new
-    end
-    return u
-end
 
-# --- Compare analytical vs. numerical for multiple limiters ---
-function compare_limiters_vs_analytical(N, L, T; CFL=0.45, limiters=[:minmod, :mc])
-    xs, results = Dict{Symbol, Tuple{Vector{Float64}, Vector{Float64}}}(), Dict{Symbol, Vector{Float64}}()
-    for lim in limiters
-        x, u = BurgersSim.burgers_muscl_godunov(N, L, T; CFL=CFL, limiter=lim)
-        xs[lim] = x
-        results[lim] = u
+        # --- Zoom window
+        xlow  = shock_center - zoom_halfwidth
+        xhigh = shock_center + zoom_halfwidth
+        xlims!(plt, (xlow, xhigh))
+
+        # --- Auto y-range but clipped to a sensible interval
+        all_u = vcat(values(num)...)
+        umin, umax = extrema(all_u)
+        margin = 0.05 * (umax - umin)
+        ylims!(plt, (umin - margin, umax + margin))
+
+        display(plt)
+        try savefig(plt, "burgers_limiters_zoom_t$(T).png") catch; end
     end
-    ua = analytical_burgers(xs[first(limiters)], T)
-    plt = plot(xs[first(limiters)], ua, lw=3, color=:black, label="Analytical (implicit)", xlabel="x", ylabel="u")
-    for lim in limiters
-        plot!(plt, xs[lim], results[lim], lw=2, label="Limiter: $lim")
-    end
-    title!(plt, "Burgers' equation comparison at t = $T")
-    display(plt)
-    savefig(plt, "burgers_limiters_vs_analytical_t$(T).png")
-    return plt
+
+    return (; x=xs, u=num)
 end
 
 end # module
