@@ -10,9 +10,21 @@ function initial_condition(x)
 end
 
 # === Exact solution for IC1 ========================================
-analytic_burgers_pulse_outflow(x::AbstractVector, T; xR=0.1, uL=1.0, uR=0.0) = begin
-    xs = xR + 0.5*(uL + uR)*T     # = xR + 0.5*T
-    @. x < xs ? uL : uR
+function analytic_burgers_pulse_outflow(x::AbstractVector, T; xR=0.1, uL=1.0, uR=0.0)
+    xs = xR + 0.5*(uL + uR)*T  # shock position
+
+    # Flat left of shock
+    xL = [minimum(x), xs]
+    uLvec = fill(uL, length(xL))
+
+    # Flat right of shock
+    xRvec = [xs, maximum(x)]
+    uRvec = fill(uR, length(xRvec))
+
+    # Concatenate for a discontinuous plot (gap at xs)
+    x_plot = vcat(xL, xRvec)
+    u_plot = vcat(uLvec, uRvec)
+    return x_plot, u_plot
 end
 
 # === Flux limiter function ===============================================
@@ -85,6 +97,15 @@ end
     @inbounds for i in 3:length(u)-2
         uout[i] = u[i] - dt_dx*(fhat[i] - fhat[i-1])
     end
+end
+
+# Grid and init helper (with 2 ghost cells per side)
+function _alloc_with_ghosts(N, L)
+    dx = L/N
+    x  = @. (0.5:1:N-0.5) * dx
+    u  = zeros(N+4); u[3:N+2] .= initial_condition.(x)
+    fhat = zeros(N+4); u1 = similar(u); u2 = similar(u)
+    return dx, x, u, fhat, u1, u2
 end
 
 """
@@ -235,121 +256,176 @@ end
 # ---------- Additional numerical flux builders ----------
 
 # First-order Godunov (upwind for Burgers) using piecewise-constant states
-function build_fluxes_godunov_firstorder!(fhat, u)
-    inds = axes(u, 1); fi, li = firstindex(u), lastindex(u)
-    amax = 0.0
-    @inbounds for i in inds
-        ip = (i == li) ? fi : i + 1
+function build_fluxes_godunov_firstorder_outflow!(fhat, u)
+    @inbounds for i in 2:length(u)-2      # interfaces i+1/2
         uL = u[i]
-        uR = u[ip]
+        uR = u[i+1]
         fhat[i] = godunov_flux_burgers(uL, uR)
-        amax = max(amax, abs(uL), abs(uR))
     end
-    return amax
+    return maximum(abs.(u[3:end-2]))      # CFL from interior
 end
 
 # Lax–Friedrichs (Rusanov) flux with global alpha = max |u|
-function build_fluxes_lax_friedrichs!(fhat, u)
-    inds = axes(u, 1); fi, li = firstindex(u), lastindex(u)
-    amax = 0.0
-    @inbounds for i in inds
-        amax = max(amax, abs(u[i]))
+function build_fluxes_lax_friedrichs_outflow!(fhat, u)
+    α = maximum(abs.(u[3:end-2]))         # global wave speed from interior
+    @inbounds for i in 2:length(u)-2
+        uL = u[i]; uR = u[i+1]
+        fhat[i] = 0.5*(flux(uL) + flux(uR)) - 0.5*α*(uR - uL)
     end
-    @inbounds for i in inds
-        ip = (i == li) ? fi : i + 1
-        uL = u[i]
-        uR = u[ip]
-        fhat[i] = 0.5*(flux(uL) + flux(uR)) - 0.5*amax*(uR - uL)
-    end
-    return amax
+    return α
 end
 
 # Lax–Wendroff (Richtmyer 2-step)
-function build_fluxes_lax_wendroff!(fhat, u, dt_dx)
-    inds = axes(u, 1); fi, li = firstindex(u), lastindex(u)
+function build_fluxes_lax_wendroff_outflow!(fhat, u, dt_dx)
     amax = 0.0
-    @inbounds for i in inds
-        ip = (i == li) ? fi : i + 1
-        u_half = 0.5*(u[i] + u[ip]) - 0.5*dt_dx*(flux(u[ip]) - flux(u[i]))
+    @inbounds for i in 2:length(u)-2
+        u_half = 0.5*(u[i] + u[i+1]) - 0.5*dt_dx*(flux(u[i+1]) - flux(u[i]))
         fhat[i] = flux(u_half)
-        amax = max(amax, abs(u[i]), abs(u[ip]), abs(u_half))
+        amax = max(amax, abs(u[i]), abs(u[i+1]), abs(u_half))
     end
     return amax
 end
 
 # ---------- Drivers ----------
 
-function burgers_upwind_godunov(N, L, T; CFL::Float64=0.45)
-    dx = L/N
-    x  = @. (0.5:1:N-0.5) * dx
-    u  = initial_condition.(x)
-    fhat = similar(u); u1 = similar(u)
-
+function burgers_upwind_godunov_outflow(N, L, T; CFL=0.45)
+    dx, x, u, fhat, u1, u2 = _alloc_with_ghosts(N, L)
     t = 0.0
     while t < T - eps()
-        amax = build_fluxes_godunov_firstorder!(fhat, u)
+        fill_ghosts_outflow!(u)
+        amax = build_fluxes_godunov_firstorder_outflow!(fhat, u)
         dt = (amax > 0) ? min(CFL*dx/amax, T - t) : (T - t)
-        euler_step!(u1, u, fhat, dt/dx)
-        u, u1 = u1, u
+        dt_dx = dt/dx
+        euler_step!(u1, u, fhat, dt_dx)
+        fill_ghosts_outflow!(u1)
+        _ = build_fluxes_godunov_firstorder_outflow!(fhat, u1)
+        euler_step!(u2, u1, fhat, dt_dx)
+        @inbounds for i in 3:length(u)-2
+            u[i] = 0.5*(u[i] + u2[i])
+        end
         t += dt
     end
-    return x, u
+    return x, @view u[3:end-2]
 end
 
-function burgers_lax_friedrichs(N, L, T; CFL::Float64=0.45)
-    dx = L/N
-    x  = @. (0.5:1:N-0.5) * dx
-    u  = initial_condition.(x)
-    fhat = similar(u); u1 = similar(u)
-
+function burgers_lax_friedrichs_outflow(N, L, T; CFL=0.45)
+    dx, x, u, fhat, u1, u2 = _alloc_with_ghosts(N, L)
     t = 0.0
     while t < T - eps()
-        amax = build_fluxes_lax_friedrichs!(fhat, u)
-        dt = (amax > 0) ? min(CFL*dx/amax, T - t) : (T - t)
-        euler_step!(u1, u, fhat, dt/dx)
-        u, u1 = u1, u
+        fill_ghosts_outflow!(u)
+        α = build_fluxes_lax_friedrichs_outflow!(fhat, u)
+        dt = (α > 0) ? min(CFL*dx/α, T - t) : (T - t)
+        dt_dx = dt/dx
+        euler_step!(u1, u, fhat, dt_dx)
+        fill_ghosts_outflow!(u1)
+        _ = build_fluxes_lax_friedrichs_outflow!(fhat, u1)
+        euler_step!(u2, u1, fhat, dt_dx)
+        @inbounds for i in 3:length(u)-2
+            u[i] = 0.5*(u[i] + u2[i])
+        end
         t += dt
     end
-    return x, u
+    return x, @view u[3:end-2]
 end
 
-function burgers_lax_wendroff(N, L, T; CFL::Float64=0.45)
-    dx = L/N
-    x  = @. (0.5:1:N-0.5) * dx
-    u  = initial_condition.(x)
-    fhat = similar(u); u1 = similar(u)
-
+function burgers_lax_wendroff_outflow(N, L, T; CFL=0.45)
+    dx, x, u, fhat, u1, u2 = _alloc_with_ghosts(N, L)
     t = 0.0
     while t < T - eps()
-        a_guess = maximum(abs, u)
+        # predictor for dt using interior |u|
+        a_guess = maximum(abs.(u[3:end-2]))
         dt = (a_guess > 0) ? min(CFL*dx/a_guess, T - t) : (T - t)
         dt_dx = dt/dx
-        _ = build_fluxes_lax_wendroff!(fhat, u, dt_dx)
+
+        fill_ghosts_outflow!(u)
+        _ = build_fluxes_lax_wendroff_outflow!(fhat, u, dt_dx)
         euler_step!(u1, u, fhat, dt_dx)
-        u, u1 = u1, u
+
+        fill_ghosts_outflow!(u1)
+        _ = build_fluxes_lax_wendroff_outflow!(fhat, u1, dt_dx)
+        euler_step!(u2, u1, fhat, dt_dx)
+
+        @inbounds for i in 3:length(u)-2
+            u[i] = 0.5*(u[i] + u2[i])
+        end
         t += dt
     end
+    return x, @view u[3:end-2]
+end
+
+""""
+    burgers_compare_at(N, L, T;
+        method::Symbol = :muscl,
+        limiter::Symbol = :mc,
+        CFL::Float64 = 0.45,
+        xR::Float64 = 0.1,
+        show_analytic::Bool = true,
+        title::AbstractString = "",
+        savepath::Union{Nothing,AbstractString} = nothing)
+
+Make a *single* plot for the chosen method with the numerical result shown as dots.
+Valid `method` values:
+  :upwind      -> first-order Godunov (outflow)
+  :laxfriedrichs or :lf  -> Lax–Friedrichs (outflow)
+  :laxwendroff  or :lw   -> Lax–Wendroff (outflow)
+  :muscl       -> MUSCL–Godunov (outflow), uses `limiter` (:minmod, :mc, :superbee, :vanleer)
+
+Returns (x, u) and displays the plot. If `savepath` is given, saves the figure there.
+"""
+function burgers_compare_at(N, L, T;
+        method::Symbol = :muscl,
+        limiter::Symbol = :mc,
+        CFL::Float64 = 0.45,
+        xR::Float64 = 0.1,
+        show_analytic::Bool = true,
+        title::AbstractString = "",
+        savepath::Union{Nothing,AbstractString} = nothing)
+
+    # run selected (all outflow-BC variants)
+    local x, u, mlabel
+    if method === :upwind
+        x, u = burgers_upwind_godunov_outflow(N, L, T; CFL=CFL)
+        mlabel = "Upwind/Godunov (1st)"
+    elseif method === :laxfriedrichs || method === :lf
+        x, u = burgers_lax_friedrichs_outflow(N, L, T; CFL=CFL)
+        mlabel = "Lax–Friedrichs (1st)"
+    elseif method === :laxwendroff || method === :lw
+        x, u = burgers_lax_wendroff_outflow(N, L, T; CFL=CFL)
+        mlabel = "Lax–Wendroff (2nd)"
+    elseif method === :muscl
+        x, u = burgers_muscl_godunov(N, L, T; CFL=CFL, limiter=limiter)
+        mlabel = "MUSCL–Godunov ($(String(limiter)))"
+    else
+        error("Unknown method: $method")
+    end
+
+    # Ensure x is a Vector for plotting helper (in case it’s a range)
+    xv = collect(x)
+    uv = collect(u)
+
+    # build plot: numeric dots
+    plt_title = isempty(title) ? "N=$N, T=$T, method=$mlabel" : title
+    plt = scatter(xv, uv; ms=5, label=mlabel,
+                  xlabel="x", ylabel="u", title=plt_title, legend=:bottomright)
+
+    # overlay analytic with vertical jump
+    if show_analytic
+        xA, uA = analytic_burgers_pulse_outflow(xv, T; xR=xR)
+        plot!(plt, xA, uA; lw=3, color=:red, label="analytic")
+    end
+
+    display(plt)
+    if savepath !== nothing
+        try
+            savefig(plt, savepath)
+        catch e
+            @warn "Could not save figure" error=e path=savepath
+        end
+    end
+
     return x, u
 end
 
-"""
-    burgers_compare_at(N, L, T; CFL=0.45, limiter=:mc)
-
-Return (x, Dict{String,Vector}) of solutions from several schemes at time T.
-"""
-function burgers_compare_at(N, L, T; CFL::Float64=0.45, limiter::Symbol=:mc)
-    x1, u_up   = burgers_upwind_godunov(N, L, T; CFL=CFL)
-    x2, u_lf   = burgers_lax_friedrichs(N, L, T; CFL=CFL)
-    x3, u_lw   = burgers_lax_wendroff(N, L, T; CFL=CFL)
-    x4, u_mg   = burgers_muscl_godunov(N, L, T; CFL=CFL, limiter=limiter)
-    results = Dict(
-        "Upwind/Godunov (1st)" => u_up,
-        "Lax–Friedrichs (1st)" => u_lf,
-        "Lax–Wendroff (2nd)"   => u_lw,
-        "MUSCL–Godunov (TVD)"  => u_mg,
-    )
-    return x1, results
-end
 
 #--------- Limiter comparison helper ----------
 function compare_limiters_zoom(
