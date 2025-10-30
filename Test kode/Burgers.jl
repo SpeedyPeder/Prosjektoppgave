@@ -22,8 +22,12 @@ plt = plot(xlabel="x", ylabel="u", legend=:bottomright, title="Snapshots every 0
 for t in times
     plot!(plt, x, snaps[t], label="t=$(t)")
 end
+
 display(plt)
-# savefig(plt, "burgers_snapshots.png")
+savefig(plt, "burgers_snapshots.png")
+
+#------ Compare limiters vs Analytical ------
+compare_limiters_vs_analytical(400, 1.0, 0.1; CFL=0.45, limiters=[:minmod, :mc])
 
 # --- Animation (GIF) ---
 gifpath = joinpath(@__DIR__, "burgers.gif")

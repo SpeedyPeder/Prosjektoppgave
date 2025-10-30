@@ -324,4 +324,37 @@ function burgers_compare_at(N, L, T; CFL::Float64=0.45, limiter::Symbol=:mc)
 end
 
 
+# --- Analytical (implicit) solution for smooth Burgers before shock ---
+function analytical_burgers(x, t; maxiter=50, tol=1e-10)
+    # u(x,t) = sin(2π(x - u t)) solved by fixed-point iteration
+    u = sin.(2π .* x)
+    for _ in 1:maxiter
+        u_new = @. sin(2π * (x - u * t))
+        if maximum(abs.(u_new .- u)) < tol
+            break
+        end
+        u = u_new
+    end
+    return u
+end
+
+# --- Compare analytical vs. numerical for multiple limiters ---
+function compare_limiters_vs_analytical(N, L, T; CFL=0.45, limiters=[:minmod, :mc])
+    xs, results = Dict{Symbol, Tuple{Vector{Float64}, Vector{Float64}}}(), Dict{Symbol, Vector{Float64}}()
+    for lim in limiters
+        x, u = BurgersSim.burgers_muscl_godunov(N, L, T; CFL=CFL, limiter=lim)
+        xs[lim] = x
+        results[lim] = u
+    end
+    ua = analytical_burgers(xs[first(limiters)], T)
+    plt = plot(xs[first(limiters)], ua, lw=3, color=:black, label="Analytical (implicit)", xlabel="x", ylabel="u")
+    for lim in limiters
+        plot!(plt, xs[lim], results[lim], lw=2, label="Limiter: $lim")
+    end
+    title!(plt, "Burgers' equation comparison at t = $T")
+    display(plt)
+    savefig(plt, "burgers_limiters_vs_analytical_t$(T).png")
+    return plt
+end
+
 end # module
