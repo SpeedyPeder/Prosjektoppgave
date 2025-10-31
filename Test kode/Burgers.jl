@@ -35,11 +35,13 @@ _ = BurgersSim.animate_burgers(N, L, T; CFL=CFL, limiter=:mc, fps=30, path=gifpa
 
 # --- Compare different FV methods and compare with analytical solution ---
 # N=50 grid to highlight smearing/oscillations
-N, L, CFL, T = 50, 1.0, 0.6, 1
+N, L, CFL, T = 50, 1, 0.6, 1
 
 # One method at a time; numeric as dots, analytic as line
 BurgersSim.burgers_compare_at(N, L, T; CFL, method=:upwind,      show_analytic=true, savepath="upwind.png")
 BurgersSim.burgers_compare_at(N, L, T; CFL, method=:laxfriedrichs, show_analytic=true, savepath="lf.png")
 BurgersSim.burgers_compare_at(N, L, T; CFL, method=:laxwendroff, show_analytic=true, savepath="lw.png")
 BurgersSim.burgers_compare_at(N, L, T; CFL, method=:muscl, limiter=:minmod, show_analytic=true, savepath="muscl_minmod.png")
-BurgersSim.burgers_compare_at(N, L, T; CFL, method=:muscl, limiter=:mc,     show_analytic=true, savepath="muscl_mc.png")
+BurgersSim.burgers_compare_at(N, L, T; CFL, method=:muscl, limiter=:superbee,     show_analytic=true, savepath="muscl_superbee.png")
+BurgersSim.burgers_compare_at(N, L, T; CFL, method=:muscl, limiter=:vanleer, show_analytic=true, savepath="muscl_vanleer.png")
+BurgersSim.burgers_compare_at(N, L, T; CFL, method=:muscl, limiter=:mc, show_analytic=true, savepath="muscl_mc.png")

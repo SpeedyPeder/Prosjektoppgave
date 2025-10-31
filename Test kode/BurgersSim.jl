@@ -395,7 +395,7 @@ function burgers_compare_at(N, L, T;
     # build plot: numeric dots
     plt_title = isempty(title) ? "N=$N, T=$T, method=$mlabel" : title
     plt = scatter(xv, uv; ms=3, label=mlabel,
-                  xlabel="x", ylabel="u", title=plt_title, legend=:bottomright)
+                  xlabel="x", ylabel="u", title=plt_title, legend=:bottomleft)
 
     # overlay analytic with vertical jump
     if show_analytic
