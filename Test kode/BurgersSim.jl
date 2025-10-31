@@ -266,8 +266,8 @@ function build_fluxes_godunov_firstorder_outflow!(fhat, u)
 end
 
 # Lax–Friedrichs (Rusanov) flux with global alpha = max |u|
-function build_fluxes_lax_friedrichs_outflow!(fhat, u)
-    α = maximum(abs.(u[3:end-2]))         # global wave speed from interior
+function build_fluxes_lax_friedrichs_outflow!(fhat, u, CFL)
+    α = 1/CFL
     @inbounds for i in 2:length(u)-2
         uL = u[i]; uR = u[i+1]
         fhat[i] = 0.5*(flux(uL) + flux(uR)) - 0.5*α*(uR - uL)
@@ -275,15 +275,13 @@ function build_fluxes_lax_friedrichs_outflow!(fhat, u)
     return α
 end
 
-# Lax–Wendroff (Richtmyer 2-step)
-function build_fluxes_lax_wendroff_outflow!(fhat, u, dt_dx)
-    amax = 0.0
-    @inbounds for i in 2:length(u)-2
-        u_half = 0.5*(u[i] + u[i+1]) - 0.5*dt_dx*(flux(u[i+1]) - flux(u[i]))
-        fhat[i] = flux(u_half)
-        amax = max(amax, abs(u[i]), abs(u[i+1]), abs(u_half))
+function build_fluxes_lax_wendroff_outflow!(fhat, u, λ)
+    @inbounds for i in 2:length(u)-2             # interface i+1/2
+        uL = u[i];  uR = u[i+1]
+        u_half = 0.5*(uL + uR) - 0.5*λ*(flux(uR) - flux(uL))
+        fhat[i] = flux(u_half)                   # f(u^{n+1/2}_{i+1/2})
     end
-    return amax
+    return nothing
 end
 
 # ---------- Drivers ----------
@@ -309,47 +307,38 @@ function burgers_upwind_godunov_outflow(N, L, T; CFL=0.45)
 end
 
 function burgers_lax_friedrichs_outflow(N, L, T; CFL=0.45)
-    dx, x, u, fhat, u1, u2 = _alloc_with_ghosts(N, L)
+    dx, x, u, fhat = _alloc_with_ghosts(N, L)[1:4]
     t = 0.0
+    dt = CFL * dx         
     while t < T - eps()
         fill_ghosts_outflow!(u)
-        α = build_fluxes_lax_friedrichs_outflow!(fhat, u)
-        dt = (α > 0) ? min(CFL*dx/α, T - t) : (T - t)
-        dt_dx = dt/dx
-        euler_step!(u1, u, fhat, dt_dx)
-        fill_ghosts_outflow!(u1)
-        _ = build_fluxes_lax_friedrichs_outflow!(fhat, u1)
-        euler_step!(u2, u1, fhat, dt_dx)
-        @inbounds for i in 3:length(u)-2
-            u[i] = 0.5*(u[i] + u2[i])
-        end
+        _ = build_fluxes_lax_friedrichs_outflow!(fhat, u, CFL)
+        euler_step!(u, u, fhat, dt/dx)
         t += dt
     end
     return x, @view u[3:end-2]
 end
 
-function burgers_lax_wendroff_outflow(N, L, T; CFL=0.45)
-    dx, x, u, fhat, u1, u2 = _alloc_with_ghosts(N, L)
+function burgers_lax_wendroff_outflow(N, L, T; CFL=0.6)
+    dx, x, u = _alloc_with_ghosts(N, L)[1:3]
+    u_half = similar(u)  # For intermediate values
     t = 0.0
+    λ = CFL
+    dt = λ * dx
     while t < T - eps()
-        # predictor for dt using interior |u|
-        a_guess = maximum(abs.(u[3:end-2]))
-        dt = (a_guess > 0) ? min(CFL*dx/a_guess, T - t) : (T - t)
-        dt_dx = dt/dx
-
         fill_ghosts_outflow!(u)
-        _ = build_fluxes_lax_wendroff_outflow!(fhat, u, dt_dx)
-        euler_step!(u1, u, fhat, dt_dx)
-
-        fill_ghosts_outflow!(u1)
-        _ = build_fluxes_lax_wendroff_outflow!(fhat, u1, dt_dx)
-        euler_step!(u2, u1, fhat, dt_dx)
-
+        # First step: Compute intermediate values at half time steps
         @inbounds for i in 3:length(u)-2
-            u[i] = 0.5*(u[i] + u2[i])
+            u_half[i] = 0.5*(u[i] + u[i+1]) - 0.5*λ*(flux(u[i+1]) - flux(u[i]))
+        end
+        # Second step: Update to next time level
+        fill_ghosts_outflow!(u_half)
+        @inbounds for i in 3:length(u)-2
+            u[i] = u[i] - λ*(flux(u_half[i]) - flux(u_half[i-1]))
         end
         t += dt
     end
+    
     return x, @view u[3:end-2]
 end
 
