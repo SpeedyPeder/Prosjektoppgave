@@ -405,13 +405,13 @@ function burgers_compare_at(N, L, T;
 
     # build plot: numeric dots
     plt_title = isempty(title) ? "N=$N, T=$T, method=$mlabel" : title
-    plt = scatter(xv, uv; ms=5, label=mlabel,
+    plt = scatter(xv, uv; ms=3, label=mlabel,
                   xlabel="x", ylabel="u", title=plt_title, legend=:bottomright)
 
     # overlay analytic with vertical jump
     if show_analytic
         xA, uA = analytic_burgers_pulse_outflow(xv, T; xR=xR)
-        plot!(plt, xA, uA; lw=3, color=:red, label="analytic")
+        plot!(plt, xA, uA; lw=1, color=:red, label="analytic")
     end
 
     display(plt)
