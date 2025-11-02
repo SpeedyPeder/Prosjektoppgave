@@ -422,7 +422,8 @@ function compare_limiters_zoom(
         CFL=0.45,
         limiters=[:minmod, :mc, :superbee, :vanleer],
         shock_center=0.5, zoom_halfwidth=L/2,
-        do_plot::Bool=true)
+        do_plot::Bool=true,
+        savepath::Union{Nothing,AbstractString}=nothing)
 
     xs  = Dict{Symbol, Vector{Float64}}()
     num = Dict{Symbol, Vector{Float64}}()
@@ -434,7 +435,6 @@ function compare_limiters_zoom(
     end
 
     if do_plot
-        @eval using Plots
         plt = plot(xlabel="x", ylabel="u",
                    title="Limiter comparison near shock at x = $shock_center",
                    legend=:topright, grid=false)
@@ -442,22 +442,32 @@ function compare_limiters_zoom(
         for (i, lim) in enumerate(limiters)
             plot!(plt, xs[lim], num[lim];
                   lw=2, label="Limiter: $lim",
-                  linestyle=[:solid, :dash, :dot, :dashdot][mod1(i,4)])
+                  linestyle=(:solid, :dash, :dot, :dashdot)[mod1(i,4)])
         end
 
-        # --- Zoom window
+        # Zoom window
         xlow  = shock_center - zoom_halfwidth
         xhigh = shock_center + zoom_halfwidth
         xlims!(plt, (xlow, xhigh))
 
-        # --- Auto y-range but clipped to a sensible interval
-        all_u = vcat(values(num)...)
+        # Auto y-range (robust collect before vcat)
+        all_u = vcat(collect(values(num))...)
         umin, umax = extrema(all_u)
-        margin = 0.05 * (umax - umin)
+        margin = 0.05 * (umax - umin + eps())   # guard tiny ranges
         ylims!(plt, (umin - margin, umax + margin))
 
         display(plt)
-        try savefig(plt, "burgers_limiters_zoom_t$(T).png") catch; end
+
+        if savepath !== nothing
+            try
+                # make sure plots/ exists
+                dir = dirname(savepath)
+                if !isempty(dir); mkpath(dir); end
+                savefig(plt, savepath)
+            catch err
+                @warn "Could not save figure" error=err path=savepath
+            end
+        end
     end
 
     return (; x=xs, u=num)
