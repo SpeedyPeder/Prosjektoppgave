@@ -31,8 +31,8 @@ savefig(joinpath(PLOTS_DIR, "burgers_snapshots.png"))
 
 # --- Compare limiters (all plotted on same figure) ---
 BurgersSim.compare_limiters_zoom(
-    100, 1, 0.5; CFL=0.6,
-    limiters=[:minmod, :mc, :superbee, :vanleer],
+    100, 1, 0.8; CFL=0.6, zoom_halfwidth= L/20,
+    limiters=[:minmod, :superbee],
     savepath=joinpath(PLOTS_DIR, "limiters_zoom.png")
 )
 
