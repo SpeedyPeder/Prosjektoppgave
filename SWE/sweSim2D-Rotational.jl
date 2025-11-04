@@ -147,23 +147,23 @@ function _flux_x!(Fx, h,qx,qy,b,η, p::Params)
             im1 = wrap(i-1, nx)    # i-1
             ip1 = wrap(i+1, nx)    # i+1
             ip2 = wrap(i+2, nx)    # i+2
-
             # Reconstruct η at face i+1/2
             sL     = slope_limited(η[im1,j], η[i,j],   η[ip1,j], p.limiter)
             sR     = slope_limited(η[i,j],   η[ip1,j], η[ip2,j], p.limiter)
+            # η at face
             ηLface = η[i,j]   + 0.5*sL
             ηRface = η[ip1,j] - 0.5*sR
-
+            # height
             hL = max(ηLface - b[i,j],    0.0)
             hR = max(ηRface - b[ip1,j],  0.0)
-
+            # Momentum in x and y directions
             qxL, qxR = qx[i,j],   qx[ip1,j]
             qyL, qyR = qy[i,j],   qy[ip1,j]
-
+            # Velocities
             uL = hL>0 ? qxL/hL : 0.0;  vL = hL>0 ? qyL/hL : 0.0
             uR = hR>0 ? qxR/hR : 0.0;  vR = hR>0 ? qyR/hR : 0.0
             cL = _c(g,hL); cR = _c(g,hR)
-
+            # Coefficients for flux update
             ap = max(0.0, max(uL + cL, uR + cR))
             am = min(0.0, min(uL - cL, uR - cR))
             denom = ap - am
@@ -172,15 +172,13 @@ function _flux_x!(Fx, h,qx,qy,b,η, p::Params)
                 continue
             end
 
-            # Physical fluxes F(U) in x
+            # Physical fluxes F(U) in x-direction 
             FL1, FL2, FL3 = qxL, (hL>0 ? qxL*uL + 0.5*g*hL*hL : 0.0), (hL>0 ? qxL*vL : 0.0)
             FR1, FR2, FR3 = qxR, (hR>0 ? qxR*uR + 0.5*g*hR*hR : 0.0), (hR>0 ? qxR*vR : 0.0)
-
             f1 = (ap*FL1 - am*FR1)/denom + (ap*am/denom)*(hR  - hL)
             f2 = (ap*FL2 - am*FR2)/denom + (ap*am/denom)*(qxR - qxL)
             f3 = (ap*FL3 - am*FR3)/denom + (ap*am/denom)*(qyR - qyL)
-
-            Fx[i,j] = (f1,f2,f3)  # face i+1/2 stored at index i
+            Fx[i,j] = (f1,f2,f3)  # Stored i+1/2 at index i
         end
     else
         # Outflow/reflective: compute ALL faces 1..nx-1 with clamped stencil
@@ -194,17 +192,14 @@ function _flux_x!(Fx, h,qx,qy,b,η, p::Params)
             sR     = slope_limited(η[i,j],   η[ip1,j], η[ip2,j], p.limiter)
             ηLface = η[i,j]   + 0.5*sL
             ηRface = η[ip1,j] - 0.5*sR
-
             hL = max(ηLface - b[i,j],    0.0)
             hR = max(ηRface - b[ip1,j],  0.0)
-
             qxL, qxR = qx[i,j],   qx[ip1,j]
             qyL, qyR = qy[i,j],   qy[ip1,j]
-
+            #Velocities
             uL = hL>0 ? qxL/hL : 0.0;  vL = hL>0 ? qyL/hL : 0.0
             uR = hR>0 ? qxR/hR : 0.0;  vR = hR>0 ? qyR/hR : 0.0
             cL = _c(p.g,hL); cR = _c(p.g,hR)
-
             ap = max(0.0, max(uL + cL, uR + cR))
             am = min(0.0, min(uL - cL, uR - cR))
             denom = ap - am
@@ -212,15 +207,12 @@ function _flux_x!(Fx, h,qx,qy,b,η, p::Params)
                 Fx[i,j] = (0.0,0.0,0.0)
                 continue
             end
-
-            # physical x-fluxes
+            # Fluxes F(U) in x-direction
             FL1, FL2, FL3 = qxL, (hL>0 ? qxL*uL + 0.5*p.g*hL*hL : 0.0), (hL>0 ? qxL*vL : 0.0)
             FR1, FR2, FR3 = qxR, (hR>0 ? qxR*uR + 0.5*p.g*hR*hR : 0.0), (hR>0 ? qxR*vR : 0.0)
-
             f1 = (ap*FL1 - am*FR1)/denom + (ap*am/denom)*(hR  - hL)
             f2 = (ap*FL2 - am*FR2)/denom + (ap*am/denom)*(qxR - qxL)
             f3 = (ap*FL3 - am*FR3)/denom + (ap*am/denom)*(qyR - qyL)
-
             Fx[i,j] = (f1,f2,f3)
         end
     end
@@ -229,7 +221,7 @@ end
 
 """
 Build y-face fluxes Gy[i,j] for the face between cells j and j+1 (at fixed i).
-Same reconstruction logic in y.
+Same reconstruction logic as before, but in y-direction.
 """
 function _flux_y!(Gy, h,qx,qy,b,η, p::Params)
     nx,ny = size(h); g = p.g
@@ -238,22 +230,19 @@ function _flux_y!(Gy, h,qx,qy,b,η, p::Params)
             jm1 = wrap(j-1, ny)
             jp1 = wrap(j+1, ny)
             jp2 = wrap(j+2, ny)
-
+            # Reconstruction in up- and down directions
             sD     = slope_limited(η[i,jm1], η[i,j],   η[i,jp1], p.limiter)
             sU     = slope_limited(η[i,j],   η[i,jp1], η[i,jp2], p.limiter)
             ηDface = η[i,j]   + 0.5*sD
             ηUface = η[i,jp1] - 0.5*sU
-
             hD = max(ηDface - b[i,j],    0.0)
             hU = max(ηUface - b[i,jp1],  0.0)
-
             qxD, qxU = qx[i,j],   qx[i,jp1]
             qyD, qyU = qy[i,j],   qy[i,jp1]
-
+            # Velocities in y-direction
             uD = hD>0 ? qxD/hD : 0.0;  vD = hD>0 ? qyD/hD : 0.0
             uU = hU>0 ? qxU/hU : 0.0;  vU = hU>0 ? qyU/hU : 0.0
             cD = _c(g,hD); cU = _c(g,hU)
-
             bp = max(0.0, max(vD + cD, vU + cU))
             bm = min(0.0, min(vD - cD, vU - cU))
             denom = bp - bm
@@ -261,38 +250,31 @@ function _flux_y!(Gy, h,qx,qy,b,η, p::Params)
                 Gy[i,j] = (0.0,0.0,0.0)
                 continue
             end
-
-            # Physical fluxes G(U) in y
+            # Physical fluxes G(U) in y-direction
             GL1, GL2, GL3 = qyD, (hD>0 ? qxD*vD : 0.0), (hD>0 ? qyD*vD + 0.5*g*hD*hD : 0.0)
             GR1, GR2, GR3 = qyU, (hU>0 ? qxU*vU : 0.0), (hU>0 ? qyU*vU + 0.5*g*hU*hU : 0.0)
-
             g1 = (bp*GL1 - bm*GR1)/denom + (bp*bm/denom)*(hU  - hD)
             g2 = (bp*GL2 - bm*GR2)/denom + (bp*bm/denom)*(qxU - qxD)
             g3 = (bp*GL3 - bm*GR3)/denom + (bp*bm/denom)*(qyU - qyD)
-
             Gy[i,j] = (g1,g2,g3)  # face j+1/2 stored at index j
         end
     else
+        # Outflow/reflective: compute ALL faces 1..ny-1 with clamped stencil as in x-direction
         for i in 1:nx, j in 1:ny-1
             jm1 = max(j-1, 1)
-            jp1 = j+1            # in 1..ny
+            jp1 = j+1            
             jp2 = min(j+2, ny)
-
             sD     = slope_limited(η[i,jm1], η[i,j],   η[i,jp1], p.limiter)
             sU     = slope_limited(η[i,j],   η[i,jp1], η[i,jp2], p.limiter)
             ηDface = η[i,j]   + 0.5*sD
             ηUface = η[i,jp1] - 0.5*sU
-
             hD = max(ηDface - b[i,j],    0.0)
             hU = max(ηUface - b[i,jp1],  0.0)
-
             qxD, qxU = qx[i,j],   qx[i,jp1]
             qyD, qyU = qy[i,j],   qy[i,jp1]
-
             uD = hD>0 ? qxD/hD : 0.0;  vD = hD>0 ? qyD/hD : 0.0
             uU = hU>0 ? qxU/hU : 0.0;  vU = hU>0 ? qyU/hU : 0.0
             cD = _c(p.g,hD); cU = _c(p.g,hU)
-
             bp = max(0.0, max(vD + cD, vU + cU))
             bm = min(0.0, min(vD - cD, vU - cU))
             denom = bp - bm
@@ -300,15 +282,12 @@ function _flux_y!(Gy, h,qx,qy,b,η, p::Params)
                 Gy[i,j] = (0.0,0.0,0.0)
                 continue
             end
-
-            # physical y-fluxes
+            # Fluxes G(U) in y-direction
             GL1, GL2, GL3 = qyD, (hD>0 ? qxD*vD : 0.0), (hD>0 ? qyD*vD + 0.5*p.g*hD*hD : 0.0)
             GR1, GR2, GR3 = qyU, (hU>0 ? qxU*vU : 0.0), (hU>0 ? qyU*vU + 0.5*p.g*hU*hU : 0.0)
-
             g1 = (bp*GL1 - bm*GR1)/denom + (bp*bm/denom)*(hU  - hD)
             g2 = (bp*GL2 - bm*GR2)/denom + (bp*bm/denom)*(qxU - qxD)
             g3 = (bp*GL3 - bm*GR3)/denom + (bp*bm/denom)*(qyU - qyD)
-
             Gy[i,j] = (g1,g2,g3)
         end
     end
@@ -320,12 +299,10 @@ end
 # =========================
 function residual!(dh, dqx, dqy, st::State, p::Params;
                    stageq::Union{Nothing,Tuple{AbstractMatrix{<:Real},AbstractMatrix{<:Real}}}=nothing)
-
     h,qx,qy,b,f,η = st.h, st.qx, st.qy, st.b, st.f, st.η
     nx,ny = size(h)
     g,dx,dy = p.g, p.dx, p.dy
-
-    # (1) Apply BCs to ghosts (one-layer halo)
+    #1) Apply BCs
     if p.bc === :periodic
         set_periodic!(st)
     elseif p.bc === :reflective
@@ -335,17 +312,15 @@ function residual!(dh, dqx, dqy, st::State, p::Params;
     else
         error("Unknown bc=$(p.bc). Use :periodic, :reflective, or :outflow.")
     end
-
-    # (2) Recompute η = h + b (cell-center)
+    #2) Recompute η = h + b for reconstruction
     for j=1:ny, i=1:nx
         η[i,j] = h[i,j] + b[i,j]
     end
+    #3) Build face fluxes via central-upwind scheme
+    _flux_x!(st.Fx, h,qx,qy,b,η,p)  # Fx[i,j] 
+    _flux_y!(st.Gy, h,qx,qy,b,η,p)  # Gy[i,j] 
 
-    # (3) Build face fluxes via central-upwind (uses η-reconstruction)
-    _flux_x!(st.Fx, h,qx,qy,b,η,p)  # Fx[i,j] on faces i=1..nx-1
-    _flux_y!(st.Gy, h,qx,qy,b,η,p)  # Gy[i,j] on faces j=1..ny-1
-
-    # (4) Flux divergence (interior cells only)
+    #4)Flux divergence for interior cells
     for j=2:ny-1, i=2:nx-1
         FxL = st.Fx[i-1,j]; FxR = st.Fx[i,j]
         GyD = st.Gy[i,j-1]; GyU = st.Gy[i,j]
@@ -354,14 +329,13 @@ function residual!(dh, dqx, dqy, st::State, p::Params;
         dqy[i,j] = - (FxR[3]-FxL[3])/dx - (GyU[3]-GyD[3])/dy
     end
 
-    # (5) Sources: -g h ∇b  +  Coriolis (skew-symmetric)
+    #5) Add in source terms for bathymetry and Coriolis
     for j=2:ny-1, i=2:nx-1
         dbdx = (b[i+1,j]-b[i-1,j])/(2*dx)
         dbdy = (b[i,j+1]-b[i,j-1])/(2*dy)
         dqx[i,j] += - g*h[i,j]*dbdx
         dqy[i,j] += - g*h[i,j]*dbdy
-
-        # skew-symmetric Coriolis: average w.r.t. stage
+        # Coriolis (skew-symmetric avg if in RK2 stage)
         if stageq === nothing
             qxavg = qx[i,j];  qyavg = qy[i,j]
         else
@@ -369,6 +343,7 @@ function residual!(dh, dqx, dqy, st::State, p::Params;
             qxavg = 0.5*(qx[i,j] + qx_stage[i,j])
             qyavg = 0.5*(qy[i,j] + qy_stage[i,j])
         end
+        #Update momentum from Coriolis
         dqx[i,j] +=  + f[i,j]*qyavg
         dqy[i,j] +=  - f[i,j]*qxavg
     end

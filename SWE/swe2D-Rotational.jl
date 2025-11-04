@@ -85,41 +85,31 @@ for n in 1:steps
     RotSW_CDKLM.step_rk2!(st, p)
 end
 
-# ---------------- Final plots (only η and velocity) ----------------
+# ---------------- Final plots  ----------------
 ηIf = (st.h .+ st.b)[ix,iy]
 uI, vI = vel_int(st)
 
-# 1) Final η
 safe_contourf_int(x_int, y_int, ηIf;
     filename=joinpath(PLOTS_DIR, "eta_final.png"),
     title="η (final) — geostrophic adjustment, limiter=$(limiter)")
 
-# 2) Final velocity quiver
 # -------- Velocity arrows with true lengths + a speed reference --------
 skip = 10
 xs = x_int[1:skip:end]
 ys = y_int[1:skip:end]
-
-# downsample velocities to the same coarse grid
 U = uI[1:skip:end, 1:skip:end]
 V = vI[1:skip:end, 1:skip:end]
 
 # 2D coordinate grids matching U,V
 X = repeat(xs, 1, length(ys))
 Y = repeat(permutedims(ys), length(xs), 1)
-
-# --- choose a scale so longest arrow ~ 70% of spacing between arrows ---
 speed = sqrt.(U.^2 .+ V.^2)
 maxspeed = maximum(speed)
-
-# distance between neighboring arrows (in plot units)
-Δ = 0.7 * min(skip*dx, skip*dy)         # target arrow length for max speed
-scale_factor = Δ / max(maxspeed, 1e-12)  # avoid divide-by-zero
-
+Δ = 0.7 * min(skip*dx, skip*dy)       
+scale_factor = Δ / max(maxspeed, 1e-12)  
 Us = U .* scale_factor
 Vs = V .* scale_factor
 
-# (optional) background η to mimic your example style; comment out if unwanted:
 pltV = contourf(x_int, y_int, permutedims(ηIf);
                 aspect_ratio=:equal, colorbar=true,
                 title="Velocity field at time t=$(steps*dt) s",
