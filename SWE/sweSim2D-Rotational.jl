@@ -2,7 +2,7 @@ module RotSW_CDKLM
 
 export Params, State,
        initialize_state, set_periodic!, set_reflective!, set_outflow!,
-       step_rk2!, sanitize_state!
+       step_rk2!
 
 # =========================
 # Parameters & State
@@ -351,17 +351,6 @@ function residual!(dh, dqx, dqy, st::State, p::Params;
 end
 
 # =========================
-# Sanitization (optional)
-# =========================
-function sanitize_state!(st::State)
-    st.h[.!isfinite.(st.h)]   .= 0.0
-    st.qx[.!isfinite.(st.qx)] .= 0.0
-    st.qy[.!isfinite.(st.qy)] .= 0.0
-    st.h .= max.(st.h, 0.0)
-    return st
-end
-
-# =========================
 # Time integration: SSP-RK2 (Heun)
 # =========================
 function step_rk2!(st::State, p::Params)
@@ -377,7 +366,6 @@ function step_rk2!(st::State, p::Params)
         qy1[i,j] = st.qy[i,j] + p.dt*dqy[i,j]
     end
     tmp = State(h1,qx1,qy1, st.b, st.f, st.η, st.Fx, st.Gy)
-    sanitize_state!(tmp)
 
     # Stage 2: Uⁿ⁺¹ = ½( Uⁿ + U¹ + dt * R(U¹) ), with skew-sym avg in Coriolis
     dh .= 0; dqx .= 0; dqy .= 0
@@ -388,7 +376,6 @@ function step_rk2!(st::State, p::Params)
         st.qx[i,j] = 0.5*(st.qx[i,j] + qx1[i,j] + p.dt*dqx[i,j])
         st.qy[i,j] = 0.5*(st.qy[i,j] + qy1[i,j] + p.dt*dqy[i,j])
     end
-    sanitize_state!(st)
     return
 end
 

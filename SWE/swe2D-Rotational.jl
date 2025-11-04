@@ -3,120 +3,106 @@ include("sweSim2D-Rotational.jl")
 using .RotSW_CDKLM
 using Plots; theme(:default)
 
-# ---------------- Config (single limiter, single IC) ----------------
-limiter = :vanalbada           # choose :minmod or :vanalbada
-steps   = 1200                 # long enough to see adjustment
+# ---------------- Choose simulation parameters ----------------
+limiter = :minmod           # :minmod or :vanalbada
+steps   = 1200
 nx, ny  = 102, 102
 dx, dy  = 500.0, 500.0
-g       = 9.81            # Adjustet for waves moving much faster, gravity (m/s²)
+g       = 9.81
 dt      = 0.5
-bc      = :outflow         # choose :periodic, :reflective, or :outflow
+bc      = :outflow          # :periodic, :reflective, or :outflow
 
-# grids
+# ---------------- Create grid ----------------
 x = range(0, step=dx, length=nx)
 y = range(0, step=dy, length=ny)
-
-# interior (exclude ghost ring for diagnostics/plots)
 ix = 2:nx-1;  iy = 2:ny-1
 x_int, y_int = x[ix], y[iy]
 
-# output folder
+# Output folder
 const PLOTS_DIR = joinpath(@__DIR__, "plots"); mkpath(PLOTS_DIR)
 
-# ---------- helpers ----------
-# robust contour of INTERIOR field (avoids ghost frame & NaNs)
-function safe_contourf_int(x, y, Z; filename=nothing, title="")
-    Zc = copy(Z); Zc[.!isfinite.(Zc)] .= 0.0
-    v = vec(Zc[isfinite.(Zc)])
-    lo, hi = extrema(v); if !(isfinite(lo)&&isfinite(hi)) || lo==hi; lo,hi=0.0,1.0; end
-    plt = contourf(x, y, Zc'; clims=(lo,hi),
-                   title=title, xlabel="x (m)", ylabel="y (m)",
-                   aspect_ratio=:equal, colorbar=true)
-    display(plt); if filename !== nothing; savefig(plt, filename); end
-    return plt
-end
-
-# compute velocities safely on interior
-function vel_int(st)
+# Compute velocities (interior)
+vel_int(st) = begin
     ufull = ifelse.(st.h .> 0, st.qx ./ max.(st.h, 1e-12), 0.0)
     vfull = ifelse.(st.h .> 0, st.qy ./ max.(st.h, 1e-12), 0.0)
-    return ufull[ix,iy], vfull[ix,iy]
+    ufull[ix,iy], vfull[ix,iy]
 end
 
-# ---------------- Initial condition: geostrophic adjustment ----------------
-# Free surface: Gaussian bump; zero initial velocity; flat bottom; constant f
-η0 = 10.0           # background free surface (depth, since b=0)
-A  = 10.0          # bump amplitude
-L  = 10_000.0       # bump width (meters)
-f0 = 1e-4           # Coriolis (1/s)
+# ---------------- Initial condition: Gaussian bump, u=v=0 ----------------
+η0 = 10.0
+A  = 10.0
+L  = 10_000.0
+f0 = 1e-4
 
+# Create parameter struct and initialize state
 p  = RotSW_CDKLM.Params(nx, ny, dx, dy, g, dt, limiter, bc)
 st = RotSW_CDKLM.initialize_state(p.nx, p.ny)
-
 st.f .= f0
 st.b .= 0.0
 st.qx .= 0.0
 st.qy .= 0.0
-
+#Create Gaussian η bump
 xc, yc = x[end]/2, y[end]/2
 @inbounds for j in eachindex(y), i in eachindex(x)
     r2 = (x[i]-xc)^2 + (y[j]-yc)^2
-    η   = η0 + A*exp(-r2/(L^2))   # not initially balanced with u=v=0
-    st.h[i,j] = η                 # (since b=0, h=η)
+    st.h[i,j] = η0 + A*exp(-r2/(L^2))   # b=0, thus h=η
 end
 
-# Fill halos to make ghosts consistent with IC
-if p.bc == :periodic
+# Fill halos according to chosen BC
+if p.bc === :periodic
     RotSW_CDKLM.set_periodic!(st)
-else
+elseif p.bc === :reflective
     RotSW_CDKLM.set_reflective!(st)
+elseif p.bc === :outflow
+    RotSW_CDKLM.set_outflow!(st)
+else
+    error("Unknown bc=$(p.bc)")
 end
+#Printing the initial condition info
+println("IC: Gaussian η bump (η0=$(η0), A=$(A), L=$(L)) with u=v=0, b=0, f=$(f0); limiter=$(limiter), bc=$(bc)")
 
-println("IC: Gaussian η bump (η0=$(η0), A=$(A), L=$(L)) with u=v=0, b=0, f=$(f0); limiter=$(limiter)")
-
-# --------- Save & plot initial η (interior) ----------
+# --------- Save & plot initial η for reference ----------
 ηI0 = (st.h .+ st.b)[ix,iy]
-safe_contourf_int(x_int, y_int, ηI0;
-    filename=joinpath(PLOTS_DIR, "eta_initial.png"),
-    title="η (initial) — Gaussian bump, u=v=0")
+plt0 = contourf(x_int, y_int, permutedims(ηI0);
+                title = "η (initial) — Gaussian bump, u=v=0",
+                xlabel="x (m)", ylabel="y (m)", aspect_ratio=:equal, colorbar=true)
+display(plt0)
+savefig(plt0, joinpath(PLOTS_DIR, "eta_initial.png"))
 
-# ---------------- Time integration ----------------
+# ---------------- Time integration to update state ----------------
 for n in 1:steps
     RotSW_CDKLM.step_rk2!(st, p)
 end
 
-# ---------------- Final plots  ----------------
+# ---------------- Final plots, counturf plot with velocity arrows----------------
 ηIf = (st.h .+ st.b)[ix,iy]
 uI, vI = vel_int(st)
+pltη = contourf(x_int, y_int, permutedims(ηIf);
+                title = "η (final) — geostrophic adjustment, limiter=$(limiter)",
+                xlabel="x (m)", ylabel="y (m)", aspect_ratio=:equal, colorbar=true)
+display(pltη)
+savefig(pltη, joinpath(PLOTS_DIR, "eta_final.png"))
 
-safe_contourf_int(x_int, y_int, ηIf;
-    filename=joinpath(PLOTS_DIR, "eta_final.png"),
-    title="η (final) — geostrophic adjustment, limiter=$(limiter)")
-
-# -------- Velocity arrows with true lengths + a speed reference --------
+# Velocity arrows (rescaled), since gravity waves are slow here
 skip = 10
-xs = x_int[1:skip:end]
-ys = y_int[1:skip:end]
+xs = x_int[1:skip:end]; ys = y_int[1:skip:end]
 U = uI[1:skip:end, 1:skip:end]
 V = vI[1:skip:end, 1:skip:end]
-
-# 2D coordinate grids matching U,V
 X = repeat(xs, 1, length(ys))
 Y = repeat(permutedims(ys), length(xs), 1)
 speed = sqrt.(U.^2 .+ V.^2)
 maxspeed = maximum(speed)
-Δ = 0.7 * min(skip*dx, skip*dy)       
-scale_factor = Δ / max(maxspeed, 1e-12)  
+Δ = 0.7 * min(skip*dx, skip*dy)               
+scale_factor = Δ / max(maxspeed, 1e-12)
 Us = U .* scale_factor
 Vs = V .* scale_factor
 
+# Plot with velocity field
 pltV = contourf(x_int, y_int, permutedims(ηIf);
                 aspect_ratio=:equal, colorbar=true,
-                title="Velocity field at time t=$(steps*dt) s",
+                title="Velocity field at t=$(steps*dt) s",
                 xlabel="x (m)", ylabel="y (m)")
 quiver!(pltV, vec(X), vec(Y), quiver=(vec(Us), vec(Vs));
         scale=:none, arrowsize=0.5, lw=1.0, color=:green, label=false)
-
-
 display(pltV)
 savefig(pltV, joinpath(PLOTS_DIR, "velocity_final.png"))
