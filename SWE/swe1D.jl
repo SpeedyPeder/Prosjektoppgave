@@ -15,8 +15,8 @@ lim  = :mc           # or :minmod
 solver = :hll        # or :rusanov
 x0   = 0.5L
 
-hl, hr = 1.0, 0.2
-times = 0.0:0.1:T
+hl, hr = 1.2, 0.4
+times = 0.0:0.3:T
 
 # ---------------- Initial condition (flat bottom, dam break) ----------------
 ic_fun(x) = ( [xi < x0 ? hl : hr for xi in x], zeros(length(x)) )
@@ -38,11 +38,8 @@ end
 
 # ---------------- Final state (numeric) ----------------
 x, h, m = sweSim1D.sw_muscl_hll(N, L, T; CFL=CFL, limiter=lim,
-                                solver=solver, ic_fun=ic_fun,
-                                source_fun=source_fun)   # no bfun -> flat
-
-HMIN = hasproperty(sweSim1D, :HMIN) ? sweSim1D.HMIN : 1e-8
-u = ifelse.(h .> HMIN, m ./ h, 0.0)
+                                solver=solver, ic_fun=ic_fun, source_fun=source_fun)  
+u =  m ./ h                                # velocity u = m/h
 
 # ---------------- Plot h and u ----------------
 p1 = plot(x, h, lw=2, label="numeric h(t=$T)", xlabel="x", ylabel="h")
@@ -79,14 +76,16 @@ end
 x_snap, snaps = sweSim1D.sw_snapshots(N, L, valid_times; CFL=CFL, limiter=lim,
                                       solver=solver, ic_fun=ic_fun, source_fun=source_fun)
 
-plt = plot(xlabel="x", ylabel="h", legend=:topright, title="Shallow water snapshots (flat bottom)")
+plt = plot(xlabel="x", ylabel="h", legend=:bottomleft, title="Shallow water snapshots (flat bottom)")
 for t in valid_times
     hT, mT = snaps[t]
-    plot!(plt, x_snap, hT,  lw=1.6, ls=:dash, label="h num t=$(round(t,digits=2))")
+    plot!(plt, x_snap, hT,  lw=1.6, ls=:dash, label="h num, at t=$(round(t,digits=2))")
     h_ex, _ = DambreakAnalytic.stoker_solution(x_snap, t; hl=hl, hr=hr, x0=x0, g=g)
-    plot!(plt, x_snap, h_ex, lw=2.2, label="h exact t=$(round(t,digits=2))")
+    plot!(plt, x_snap, h_ex, lw=2.2, label="h exact, at t=$(round(t,digits=2))")
 end
 display(plt)
+savefig(plt, joinpath(@__DIR__, "shallow_water_snapshots.png"))
+println("Saved snapshots plot to: $(joinpath(@__DIR__, "shallow_water_snapshots.png"))")
 
 # ------------- Animation (numeric) -------------
 gifpath = joinpath(@__DIR__, "shallow_water.gif")
