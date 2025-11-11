@@ -14,6 +14,7 @@ T    = 1.0
 lim  = :mc           # or :minmod
 solver = :hll        # or :rusanov
 x0   = 0.5L
+dx = L / N
 
 hl, hr = 1.2, 0.4
 times = 0.0:0.3:T
