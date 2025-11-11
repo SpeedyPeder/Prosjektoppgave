@@ -225,12 +225,12 @@ function sw_KP_upwind(N, L, T; CFL::Float64 = 0.45, limiter::Symbol = :mc, ic_fu
     t = 0.0
     while t < T - eps()
         Bf, Bc, dx = build_Btilde_faces_centers(x, bfun)  
-        amax = build_fluxes_reflective!(H, η, m,dx; Bf=Bf, Bc=Bc, limiter=limiter)
+        amax = build_fluxes_reflective!(H, η, m,dx; Bf=Bf, limiter=limiter)
         # KP07 CFL condition with safety factor 0.1
         dt = 0.1*dx/(2*amax)  
         euler_step!(η1, m1, η, m, H, dt, dx, Bf, Bc)
         # Use computed η1,m1 to rebuild fluxes
-        _ = build_fluxes_reflective!(H, η1, m1,dx; Bf=Bf, Bc=Bc, limiter=limiter)
+        _ = build_fluxes_reflective!(H, η1, m1,dx; Bf=Bf, limiter=limiter)
         euler_step!(η2, m2, η1, m1, H, dt, dx, Bf, Bc)
         # Heun average
         @inbounds for j in eachindex(η)
