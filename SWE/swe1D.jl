@@ -11,8 +11,8 @@ using Printf
 N, L = 100, 5.0
 CFL  = 0.45
 T    = 1.0
-lim  = :mc           # or :minmod
-solver = :hll        # or :rusanov
+lim  = :minmod2       # or :minmod
+#solver = :hll        # or :rusanov
 x0   = 0.5L
 dx = L / N
 

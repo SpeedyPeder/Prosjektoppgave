@@ -13,10 +13,10 @@ lim   = :minmod
 # times = 0.0:0.1:T   # (unused here)
 
 # ---------------- Bathymetry (pick ONE) ----------------
-# bfun(x::AbstractVector) = 0.20 .* (x ./ L) .+ ifelse.(x .> 0.7L, 0.40, 0.0)    # linear + step
+bfun(x::AbstractVector) = 0.20 .* (x ./ L) .+ ifelse.(x .> 0.7L, 0.40, 0.0)    # linear + step
 # bfun(x::AbstractVector) = 0.10 .* exp.(-((x .- 0.5L).^2) ./ (0.05L)^2)         # Gaussian bump
 # bfun(x::AbstractVector) = ifelse.(x .> 0.55L, 0.07, 0.0) .+ ifelse.(x .> 0.82L, 0.05, 0.0) # double step
-bfun(x::AbstractVector) = zeros(length(x))                                       # flat bottom
+#bfun(x::AbstractVector) = zeros(length(x))                                       # flat bottom
 
 # ---------------- Initial condition ----------------
 # Lake-at-rest: η = η0 const, u = 0  (works for ANY bfun)
@@ -35,8 +35,18 @@ x, η, m = sweSim1D.sw_KP_upwind(N, L, T; CFL=CFL, limiter=lim,
                                 ic_fun=ic_fun, bfun=bfun)
 
 # ---------------- Plot ----------------
-pη = plot(x, η, lw=2, label="η at T=$(T)", xlabel="x", ylabel="η",
-          title="Shallow water with bathymetry, T=$(T)")
+b = bfun(x)
+
+# Plot free surface η and bottom b(x)
+pη = plot(
+    x, η,
+    lw = 2,
+    label = "η (free surface)",
+    xlabel = "x",
+    ylabel = "Height [m]",
+    title = "Shallow Water with Bathymetry, T = $(T)",
+)
+plot!(x, b, lw = 2, ls = :dash, label = "b(x) (bathymetry)")
 display(pη)
 
 
