@@ -74,7 +74,7 @@ end
         end
         xf[N+1] = x[N] + 0.5*dx
     end
-    Bf = bfun(xf)                  # face values Bj+1/2
+    Bf = bfun(xf)                  # face values Bj-1/2
     Bc = similar(x)                
     @inbounds for i in 1:N
         Bc[i] = 0.5*(Bf[i] + Bf[i+1])  # cell values Bj = (Bf_left + Bf_right)/2
@@ -92,103 +92,100 @@ function bathy_source_rate_KP07_eta!(S2, η, Bf, Bc, dx)
     return nothing
 end
 
-# ----------- Desingualirazation of velocity (KP07 eq. 2.19) -----------
-@inline function u_corr_KP(mL, mR, hL, hR, eps_h)
-    uL  = (sqrt(2)*hL*mL)/sqrt(hL^4 + max(hL^4, eps_h))
-    uR  = (sqrt(2)*hR*mR)/sqrt(hR^4 + max(hR^4, eps_h))
-    return uL, uR
-end
-
-# ------------------ Flux builder (reflective BC) --------
 
 """
-    build_fluxes_reflective!(Fhat, h, m; Bf, Bc, limiter=:mc, solver=:hll) -> amax
+    build_fluxes_reflective!(H, η, m, dx; Bf, limiter=:mc)
 
-MUSCL reconstruction on (η, u) with Kurganov–Petrova (2007) corrections.
-Depths at faces use the FACE bathymetry Bf (eq. 2.14). Reflective walls enforced.
+Inputs:
+- η: free surface elevation (cell-centered)
+- m: discharge (cell-centered)
+- dx: grid spacing
+- Bf: bathymetry at faces (length N+1)
+- limiter: slope limiter symbol (:mc or :minmod)
+
+Outputs:
+- H: (N+1)×2 array with fluxes [H₁, H₂] at each interface x_{f−1/2}
+- returns amax, the maximum wave speed for CFL condition
 """
-function build_fluxes_reflective!(Fhat, η, m, dx; Bf, Bc, limiter::Symbol=:mc)
+function build_fluxes_reflective!(H, η, m, dx; Bf, limiter::Symbol=:mc)
     N = length(η)
-    @assert length(m) == N && length(Bc) == N && length(Bf) == N+1
-    @assert size(Fhat,1) == N+1 && size(Fhat,2) == 2
+    @assert size(H,1) == N+1 && size(H,2) == 2
+    @assert length(Bf) == N+1
 
-    # ---- Ghosts (reflective)
+    # ---------------- Ghost cells (reflective BCs) ----------------
     ηg = similar(η, N+2);  ηg[2:N+1] = η
-    mg = similar(m, N+2);  mg[2:N+1] = m
-    Bcg = similar(Bc, N+2); Bcg[2:N+1] = Bc
-    ηg[1]= ηg[2];      mg[1]=-mg[2];       Bcg[1]=Bcg[2]
-    ηg[end]=ηg[end-1]; mg[end]=-mg[end-1]; Bcg[end]=Bcg[end-1]
+    mg = similar(m,  N+2); mg[2:N+1] = m
+    ηg[1] = ηg[2];          ηg[end] = ηg[end-1]
+    mg[1] = -mg[2];         mg[end] = -mg[end-1]
 
-    hg = similar(ηg)
-    # ---- Reconstruct on (ηg,(mg))
-    @inbounds for j in eachindex(hg)
-        hg[j] = ηg[j] - Bcg[j]
-    end
-    # slopes on (η,m)
+    # ---------------- Slope reconstruction ----------------
     sη = similar(ηg); sm = similar(mg)
     @inbounds for j in 2:N+1
-        #Limited slope coefficients for η and m
         sη[j] = slope_limited(ηg[j-1], ηg[j], ηg[j+1]; limiter=limiter)
         sm[j] = slope_limited(mg[j-1], mg[j], mg[j+1]; limiter=limiter)
     end
-    sη[1]=sη[2]; sm[1]=sm[2]; sη[end]=sη[end-1]; sm[end]=sm[end-1]
+    sη[1] = sη[2];  sη[end] = sη[end-1]
+    sm[1] = sm[2];  sm[end] = sm[end-1]
 
-    mL = similar(Bf)  
-    mR  = similar(Bf) 
-    ηL = similar(Bf)  
-    ηR  = similar(Bf)   
-    @inbounds for j in 1:N+1
-        # Reconstructed states at faces j+1/2
-        ηL[j] = ηg[j] + 0.5*sη[j]  
-        ηR[j] = ηg[j+1] - 0.5*sη[j+1] 
-        mL[j] = mg[j] + 0.5*sm[j]
-        mR[j] = mg[j+1] - 0.5*sm[j+1] 
-        # KP07 per-cell correction (eqs. 2.15–2.16) on η 
-        if ηL[j] < Bf[j+1]           # (2.15)
-            ηL[j] = Bf[j+1]
-            ηR[j] = 2*ηg[j] - Bf[j+1]
-        end
-        if ηR[j] < Bf[j]           # (2.16)
-            ηL[j] = 2*ηg[j] - Bf[j]
-            ηR[j] = Bf[j]
-        end
-    end
-    # Desingularized velocities (2.19),
-    # one-sided speeds (2.22)-(2.23), CU flux
-    eps_h = dx^4  # KP recommendation
+    eps_h = dx^4
     amax = 0.0
-    @inbounds for j in 1:N+2
-        hL = ηL[j] - Bf[j]
-        hR = ηR[j] - Bf[j]
 
-        uL, uR = u_corr_KP(mL[j], mR[j], hL, hR, eps_h)
-        
-        #Recompute momenta/discharges
-        mL[j] = uL * hL
-        mR[j] = uR * hR
+    # ---------------- Face loop (interfaces x_{f−1/2}) ----------------
+    @inbounds for f in 1:N+1
+        # Provisional MUSCL states from left (f) and right (f+1) cells
+        ηL = ηg[f]   + 0.5*sη[f]
+        ηR = ηg[f+1] - 0.5*sη[f+1]
+        mL = mg[f]   + 0.5*sm[f]
+        mR = mg[f+1] - 0.5*sm[f+1]
 
-        #Compute aplus and aminus for CU flux
-        
+        # --- KP positivity correction at this face ---
+        Bj = Bf[f]
+        if ηL < Bj
+            ηL = Bj
+            ηR = 2*ηg[f] - Bj
+        end
+        if ηR < Bj
+            ηR = Bj
+            ηL = 2*ηg[f+1] - Bj
+        end
+
+        # --- Compute depths at face (h = η - B) --- 
+        hL = max(ηL - Bj, 0.0) #Should be positive so max is probably not needed, but keep it for safety
+        hR = max(ηR - Bj, 0.0)
+
+        # --- Desingularize velocities (KP07 eq. 2.19) ---
+        uL = (sqrt(2)*hL*mL) / sqrt(hL^4 + max(hL^4, eps_h))
+        uR = (sqrt(2)*hR*mR) / sqrt(hR^4 + max(hR^4, eps_h))
+
+        # Recompute momenta
+        mL = hL * uL
+        mR = hR * uR
+
+        # --- One-sided speeds (2.22)-(2.23) ---
         a_plus  = max(uL + sqrt(g*hL), uR + sqrt(g*hR), 0.0)
         a_minus = min(uL - sqrt(g*hL), uR - sqrt(g*hR), 0.0)
-
-        # Compute fluxes H[j]
-        H1 = similar(mL)
-        H2 = similar(mL)
         denom = a_plus - a_minus
-        #Have tried to replace (hu)^2/h with hu*u here, it should be equivalent, 
-        # as momentum is reconstructed from h and corrected u at interfaces
+
+        # --- Physical fluxes F(U,B) with U = (η, m) ---
+        F1L, F1R = mL, mR
+        # Uses the left and right heights and speed instead of η and Bf, but should be equivalent
+        F2L = mL*uL + 0.5*g*hL^2   
+        F2R = mR*uR + 0.5*g*hR^2
+
+        # --- Central-upwind flux (eq. 2.18 in KP07) ---
         if denom == 0.0
-            H1[j] = 0.5*(mL[j] + mR[j])
-            H2[j] = 0.5 * (mL[j]*uL + 0.5*g*hL^2 + (mR[j]*uR + 0.5*g*hR^2))
+            H1 = 0.5*(F1L + F1R)
+            H2 = 0.5*(F2L + F2R)
         else
-            H1[j] = (a_plus*mL[j] - a_minus*mR[j] + a_plus*a_minus*(ηR[j] - ηL[j])) / denom
-            H2[j] = (a_plus*mL[j]*hL- a_minus*mR[j]*hR + a_plus*a_minus*(mR[j] - mL[j])) / denom
+            H1 = (a_plus*F1L - a_minus*F1R + a_plus*a_minus*(ηR - ηL)) / denom
+            H2 = (a_plus*F2L - a_minus*F2R + a_plus*a_minus*(mR - mL)) / denom
         end
-        Fhat[j,1] = H1[j]
-        Fhat[j,2] = H2[j]
+
+        H[f,1] = H1
+        H[f,2] = H2
         amax = max(amax, abs(a_plus), abs(a_minus))
     end
+
     return amax
 end
 
@@ -229,8 +226,8 @@ function sw_KP_upwind(N, L, T; CFL::Float64 = 0.45, limiter::Symbol = :mc, ic_fu
     while t < T - eps()
         Bf, Bc, dx = build_Btilde_faces_centers(x, bfun)  
         amax = build_fluxes_reflective!(H, η, m,dx; Bf=Bf, Bc=Bc, limiter=limiter)
-        # KP07 CFL condition with safety factor 0.8
-        dt = 0.8*dx/(2*amax)  
+        # KP07 CFL condition with safety factor 0.1
+        dt = 0.1*dx/(2*amax)  
         euler_step!(η1, m1, η, m, H, dt, dx, Bf, Bc)
         # Use computed η1,m1 to rebuild fluxes
         _ = build_fluxes_reflective!(H, η1, m1,dx; Bf=Bf, Bc=Bc, limiter=limiter)
