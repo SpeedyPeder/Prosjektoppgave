@@ -2,7 +2,7 @@ module sweSim1D
 
 using StaticArrays
 
-export sw_muscl_hll, sw_snapshots, animate_sw,
+export sw_KP_upwind, sw_KP_snapshots, animate_sw_KP, kp_plot_final,
        default_ic_dambreak, default_ic_sine, default_source_zero,
        default_bathymetry, g
 
@@ -35,6 +35,7 @@ end
     error("Unknown limiter $limiter")
 end
 
+#################### Bruker ikke disse fluxene lenger ##########################
 # ------------------ Riemann solvers ----------------------
 @inline function rusanov_flux(hL,uL,hR,uR)
     mL = hL*uL; mR = hR*uR
@@ -59,7 +60,7 @@ end
         return (sR*FL - sL*FR + sL*sR*(SVector(hR,mR) - SVector(hL,mL))) / (sR - sL)
     end
 end
-
+######################################################################################
 
 # --------------- Well-balanced bathy source (ghosted) ---------------
 # Linear reconstruction of bathymetry at faces and centers
@@ -243,20 +244,191 @@ function sw_KP_upwind(N, L, T; CFL::Float64 = 0.45, limiter::Symbol = :mc, ic_fu
 end
 
 
+#----------- Adding plotting functions for KP-scheme --------------
+
+# ---------------- Output directory  for plots----------------
+const DEFAULT_OUTDIR = "Plots - KP-1D-bathymetry"
+ensure_outdir(outdir::AbstractString=DEFAULT_OUTDIR) = (isdir(outdir) || mkpath(outdir); outdir)
+
+# ---------------- KP: Final-state plotting helper ----------------
+"""
+    kp_plot_final(x, η, m, bfun; ylim_η=nothing, ylim_u=nothing, T=NaN)
+
+Produces a 2-panel plot:
+  top: free-surface η together with bathymetry b(x)
+  bot: velocity u = m / (η - b)
+"""
+function kp_plot_final(x, η, m, bfun; T=NaN,
+                       outdir::AbstractString=DEFAULT_OUTDIR,
+                       filename::Union{Nothing,String}=nothing,
+                       save::Bool=true)
+    @eval using Plots
+    ensure_outdir(outdir)
+
+    b = bfun(x)               # vectorized b(x)
+    h = @. η - b
+    u = similar(η)
+    @inbounds for i in eachindex(η)
+        u[i] = (h[i] > HMIN) ? (m[i]/h[i]) : 0.0
+    end
+
+    title_top = isnan(T) ? "Shallow water (KP CU scheme)" :
+                           "Shallow water (KP CU scheme), T=$(T)"
+
+    p1 = plot(x, η, lw=2, label="η", xlabel="x", ylabel="elevation",
+              title=title_top)
+    plot!(p1, x, b, lw=2, ls=:dash, label="b(x)")
+    p2 = plot(x, u, lw=2, label="u", xlabel="x", ylabel="u")
+    fig = plot(p1, p2, layout=(2,1), size=(950,650))
+    display(fig)
+    if save
+        default_name = isnan(T) ? "final.png" : "final_T=$(round(T,digits=3)).png"
+        fname = something(filename, default_name)
+        savefig(fig, joinpath(outdir, fname))
+    end
+    return nothing
+end
+
+# ---------------- KP: Snapshots ----------------
+"""
+    sw_KP_snapshots(N, L, times; CFL=0.45, limiter=:mc, ic_fun=default_ic_dambreak, bfun=default_bathymetry)
+
+Advance the KP solver and return (x, snapshots) where
+`snapshots[t] => (η, m)` at each requested time t in `times`.
+"""
+function sw_KP_snapshots(N, L, times; CFL::Float64=0.45, limiter::Symbol=:mc,
+                         ic_fun=default_ic_dambreak, bfun=default_bathymetry)
+    dx = L/N
+    x  = @. (0.5:1:N-0.5) * dx
+
+    # IC in (η, m)
+    h0, u0 = ic_fun(x)
+    b0     = bfun(x)
+    η  = h0 .+ b0
+    m  = h0 .* u0
+
+    H   = zeros(eltype(η), N+1, 2)
+    η1  = similar(η);  m1 = similar(m)
+    η2  = similar(η);  m2 = similar(m)
+
+    # sort & prepare output
+    times = sort(collect(times))
+    results = Dict{Float64, Tuple{Vector{Float64},Vector{Float64}}}()
+    t = 0.0
+    if !isempty(times) && isapprox(times[1], 0.0; atol=1e-15)
+        results[0.0] = (copy(η), copy(m))
+        times = times[2:end]
+    end
+
+    while !isempty(times)
+        target = first(times)
+        while t < target - eps()
+            Bf, Bc, _dx = build_Btilde_faces_centers(x, bfun)
+
+            # Correct: use η (not h) and pass dx positionally
+            amax = build_fluxes_reflective!(H, η, m, dx; Bf=Bf, limiter=limiter)
+            dt   = (amax > 0) ? min(0.8*dx/(2*amax), target - t) : (target - t)
+
+            # Heun (2-stage RK2)
+            euler_step!(η1, m1, η,  m,  H, dt, dx, Bf, Bc)
+            _  = build_fluxes_reflective!(H, η1, m1, dx; Bf=Bf, limiter=limiter)
+            euler_step!(η2, m2, η1, m1, H, dt, dx, Bf, Bc)
+
+            @inbounds for j in eachindex(η)
+                η[j] = 0.5*(η[j] + η2[j])
+                m[j] = 0.5*(m[j] + m2[j])
+            end
+            t += dt
+        end
+        results[target] = (copy(η), copy(m))
+        popfirst!(times)
+    end
+    return x, results
+end
+
+# ---------------- KP: Animation ----------------
+"""
+    animate_sw_KP(N, L, T; CFL=0.45, limiter=:mc, ic_fun=default_ic_dambreak,
+                  bfun=default_bathymetry, fps=30, ylim_η=(nothing,nothing),
+                  ylim_u=(nothing,nothing), path="shallow_water_KP.gif")
+
+Run the KP solver while writing frames each sub-step.
+Top panel: η with b(x); bottom: velocity u.
+"""
+function animate_sw_KP(N, L, T; CFL::Float64=0.45, limiter::Symbol=:mc,
+                       ic_fun=default_ic_dambreak, bfun=default_bathymetry,
+                       fps::Integer=30,
+                       path::AbstractString="shallow_water_KP.gif",   # kept for compatibility
+                       outdir::AbstractString=DEFAULT_OUTDIR)
+    @eval using Plots
+    ensure_outdir(outdir)
+    fullpath = joinpath(outdir, path)  # save into KP/
+
+    dx = L/N
+    x  = @. (0.5:1:N-0.5) * dx
+
+    h0, u0 = ic_fun(x)
+    b  = bfun(x)
+    η  = h0 .+ b
+    m  = h0 .* u0
+
+    H   = zeros(eltype(η), N+1, 2)
+    η1  = similar(η);  m1 = similar(m)
+    η2  = similar(η);  m2 = similar(m)
+
+    # helpers
+    make_frame = function(t)
+        h = @. η - b
+        u = similar(η)
+        @inbounds for i in eachindex(η)
+            u[i] = (h[i] > HMIN) ? (m[i]/h[i]) : 0.0
+        end
+        p1 = plot(x, η, lw=2, label="η", xlabel="x", ylabel="elevation",
+                  title="t=$(round(t,digits=3))")
+        plot!(p1, x, b, lw=2, ls=:dash, label="b(x)")
+        p2 = plot(x, u, lw=2, label="u", xlabel="x", ylabel="u")
+        plot(p1, p2, layout=(2,1))
+    end
+
+    anim = Animation()
+    frame(anim, make_frame(0.0))   # ensure non-empty
+
+    t = 0.0
+    while t < T - eps()
+        Bf, Bc, _dx = build_Btilde_faces_centers(x, bfun)
+        amax = build_fluxes_reflective!(H, η, m, dx; Bf=Bf, limiter=limiter)
+        cmax = (isfinite(amax) && amax > 0) ? amax : 0.0
+        dt  = (cmax > 0) ? min(0.8*dx/(2*cmax), T - t) : (T - t)
+        dt  = max(dt, 0.0)
+
+        euler_step!(η1, m1, η,  m,  H, dt, dx, Bf, Bc)
+        _  = build_fluxes_reflective!(H, η1, m1, dx; Bf=Bf, limiter=limiter)
+        euler_step!(η2, m2, η1, m1, H, dt, dx, Bf, Bc)
+
+        @inbounds for j in eachindex(η)
+            η[j] = 0.5*(η[j] + η2[j])
+            m[j] = 0.5*(m[j] + m2[j])
+        end
+        t += dt
+
+        frame(anim, make_frame(t))
+    end
+
+    # safety: ensure at least one frame
+    if length(anim.frames) == 0
+        frame(anim, make_frame(0.0))
+    elseif t < T - 1e-12
+        frame(anim, make_frame(T))
+    end
+
+    gif(anim, fullpath, fps=fps)
+    return x, η, m
+end
 
 
 
-
-
-
-
-
-
-
-
-
-
-
+####################################################################################################################################################################
+######################## Gammel kode for MUSCL-HLL eller MUSCL-Rusanov. Har byttet ut med KP-Central Upwind flux over ###############################################
 
 """
     sw_muscl_hll(N, L, T; CFL=0.4, limiter=:mc, solver=:hll,
@@ -428,154 +600,5 @@ function default_ic_sine(x; h0=1.0, amp=0.1, u0=0.0)
     return h, u
 end
 default_source_zero(h, m, x, t) = nothing
-
-#----------- Adding plotting functions for KP-scheme --------------
-# ---------------- KP: Final-state plotting helper ----------------
-"""
-    kp_plot_final(x, η, m, bfun; ylim_η=nothing, ylim_u=nothing, T=NaN)
-
-Produces a 2-panel plot:
-  top: free-surface η together with bathymetry b(x)
-  bot: velocity u = m / (η - b)
-"""
-function kp_plot_final(x, η, m, bfun; ylim_η=nothing, ylim_u=nothing, T=NaN)
-    @eval using Plots
-    b = bfun(x)
-    h = @. η - b
-    u = similar(η)
-    @inbounds for i in eachindex(η)
-        u[i] = (h[i] > HMIN) ? (m[i]/h[i]) : 0.0
-    end
-    title_top = isnan(T) ? "Shallow water (KP CU scheme)" :
-                           "Shallow water (KP CU scheme), T=$(T)"                      
-    p1 = plot(x, η, lw=2, label="η", xlabel="x", ylabel="elevation",
-              title=title_top, ylim=ylim_η)
-    plot!(p1, x, b, lw=2, ls=:dash, label="b(x)")
-    p2 = plot(x, u, lw=2, label="u", xlabel="x", ylabel="u", ylim=ylim_u)
-    display(plot(p1, p2, layout=(2,1), size=(950,650)))
-    return nothing
-end
-
-# ---------------- KP: Snapshots ----------------
-"""
-    sw_KP_snapshots(N, L, times; CFL=0.45, limiter=:mc, ic_fun=default_ic_dambreak, bfun=default_bathymetry)
-
-Advance the KP solver and return (x, snapshots) where
-`snapshots[t] => (η, m)` at each requested time t in `times`.
-"""
-function sw_KP_snapshots(N, L, times; CFL::Float64=0.45, limiter::Symbol=:mc,
-                         ic_fun=default_ic_dambreak, bfun=default_bathymetry)
-    dx = L/N
-    x  = @. (0.5:1:N-0.5) * dx
-
-    # IC in (η, m)
-    h0, u0 = ic_fun(x)
-    b0     = bfun(x)
-    η  = h0 .+ b0
-    m  = h0 .* u0
-
-    H   = zeros(eltype(η), N+1, 2)
-    η1  = similar(η);  m1 = similar(m)
-    η2  = similar(η);  m2 = similar(m)
-
-    # sort & prepare output
-    times = sort(collect(times))
-    results = Dict{Float64, Tuple{Vector{Float64},Vector{Float64}}}()
-    t = 0.0
-    if !isempty(times) && isapprox(times[1], 0.0; atol=1e-15)
-        results[0.0] = (copy(η), copy(m))
-        times = times[2:end]
-    end
-
-    while !isempty(times)
-        target = first(times)
-        while t < target - eps()
-            Bf, Bc, _dx = build_Btilde_faces_centers(x, bfun)
-            h = @. η - Bc
-            amax = build_fluxes_reflective!(H, h, m; Bf=Bf, Bc=Bc, limiter=limiter)
-            # KP-like CFL (use your preferred factor)
-            dt = (amax > 0) ? min(0.8*dx/(2*amax), target - t) : (target - t)
-
-            # Heun (2-stage RK2)
-            euler_step!(η1, m1, η,  m,  H, dt, dx, Bf, Bc)
-            h1 = @. η1 - Bc
-            _  = build_fluxes_reflective!(H, h1, m1; Bf=Bf, Bc=Bc, limiter=limiter)
-            euler_step!(η2, m2, η1, m1, H, dt, dx, Bf, Bc)
-
-            @inbounds for j in eachindex(η)
-                η[j] = 0.5*(η[j] + η2[j])
-                m[j] = 0.5*(m[j] + m2[j])
-            end
-            t += dt
-        end
-        results[target] = (copy(η), copy(m))
-        popfirst!(times)
-    end
-    return x, results
-end
-
-# ---------------- KP: Animation ----------------
-"""
-    animate_sw_KP(N, L, T; CFL=0.45, limiter=:mc, ic_fun=default_ic_dambreak,
-                  bfun=default_bathymetry, fps=30, ylim_η=(nothing,nothing),
-                  ylim_u=(nothing,nothing), path="shallow_water_KP.gif")
-
-Run the KP solver while writing frames each sub-step.
-Top panel: η with b(x); bottom: velocity u.
-"""
-function animate_sw_KP(N, L, T; CFL::Float64=0.45, limiter::Symbol=:mc,
-                       ic_fun=default_ic_dambreak, bfun=default_bathymetry,
-                       fps::Integer=30, ylim_η=(nothing,nothing), ylim_u=(nothing,nothing),
-                       path::AbstractString="shallow_water_KP.gif")
-    @eval using Plots
-
-    dx = L/N
-    x  = @. (0.5:1:N-0.5) * dx
-
-    h0, u0 = ic_fun(x)
-    b  = bfun(x)
-    η  = h0 .+ b
-    m  = h0 .* u0
-
-    H   = zeros(eltype(η), N+1, 2)
-    η1  = similar(η);  m1 = similar(m)
-    η2  = similar(η);  m2 = similar(m)
-
-    anim = Animation()
-    t = 0.0
-    while t < T - eps()
-        # frame
-        h = @. η - b
-        u = similar(η)
-        @inbounds for i in eachindex(η)
-            u[i] = (h[i] > HMIN) ? (m[i]/h[i]) : 0.0
-        end
-        p1 = plot(x, η, lw=2, label="η", xlabel="x", ylabel="elevation",
-                  title="t=$(round(t,digits=3))", ylim=ylim_η)
-        plot!(p1, x, b, lw=2, ls=:dash, label="b(x)")
-        p2 = plot(x, u, lw=2, label="u", xlabel="x", ylabel="u", ylim=ylim_u)
-        frame(anim, plot(p1, p2, layout=(2,1)))
-
-        # step
-        Bf, Bc, _dx = build_Btilde_faces_centers(x, bfun)
-        h = @. η - Bc
-        amax = build_fluxes_reflective!(H, h, m; Bf=Bf, Bc=Bc, limiter=limiter)
-        dt  = (amax > 0) ? min(0.8*dx/(2*amax), T - t) : (T - t)
-
-        euler_step!(η1, m1, η,  m,  H, dt, dx, Bf, Bc)
-        h1 = @. η1 - Bc
-        _  = build_fluxes_reflective!(H, h1, m1; Bf=Bf, Bc=Bc, limiter=limiter)
-        euler_step!(η2, m2, η1, m1, H, dt, dx, Bf, Bc)
-
-        @inbounds for j in eachindex(η)
-            η[j] = 0.5*(η[j] + η2[j])
-            m[j] = 0.5*(m[j] + m2[j])
-        end
-        t += dt
-    end
-
-    gif(anim, path, fps=fps)
-    return x, η, m
-end
 
 end # module
