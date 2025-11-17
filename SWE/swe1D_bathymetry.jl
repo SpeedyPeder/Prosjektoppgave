@@ -17,7 +17,7 @@ times = 0.0:0.2:T
 
 # ---------------- Bathymetry (pick ONE) ----------------
 #bfun(x::AbstractVector) = 0.20 .* (x ./ L) .+ ifelse.(x .> 0.7L, 0.40, 0.0)    # linear + step
-# bfun(x::AbstractVector) = 0.10 .* exp.(-((x .- 0.5L).^2) ./ (0.05L)^2)         # Gaussian bump
+#bfun(x::AbstractVector) = 0.10 .* exp.(-((x .- 0.5L).^2) ./ (0.05L)^2)         # Gaussian bump
 #bfun(x::AbstractVector) = ifelse.(x .> 0.55L, 0.07, 0.0) .+ ifelse.(x .> 0.82L, 0.05, 0.0) # double step
 bfun(x::AbstractVector) = zeros(length(x))                                       # flat bottom
 
@@ -59,5 +59,19 @@ x, snaps = sweSim1D.sw_KP_snapshots(N, L, times; CFL = CFL, limiter  = lim, ic_f
 # Animation autosaves to KP/shallow_water_KP.gif
 sweSim1D.animate_sw_KP(N, L, T; ic_fun=ic_dambreak, bfun=bfun, path="run1.gif")
 
+#------------------ Run simulation  2 - Gaussian Surface with Gaussian bump ----------------
+bfun(x::AbstractVector) = 0.10 .* exp.(-((x .- 0.5L).^2) ./ (0.05L)^2)         # Gaussian bump
+T = 2 #Running for a bit longer time
+x, η, m = sweSim1D.sw_KP_upwind(N, L, T; CFL=CFL, limiter=lim, ic_fun=ic_gaussian_surface, bfun=bfun) #NB! Bruker adaptiv CFL fra KP i fuksjonen, så parameter kan sløyfes
 
+# Final plot autosaves to KP/final_T=1.0.png
+sweSim1D.kp_plot_final(x, η, m, bfun; T= T, filename="run2_final.png")
+
+x, snaps = sweSim1D.sw_KP_snapshots(N, L, times; CFL = CFL, limiter  = lim, ic_fun = ic_gaussian_surface, bfun = bfun, makeplot = true, filename = "run2_snapshots.png")
+
+# Animation autosaves to KP/shallow_water_KP.gif
+sweSim1D.animate_sw_KP(N, L, T; ic_fun=ic_gaussian_surface, bfun=bfun, path="run2.gif")
+
+#----------------------- Run simulation  3   ----------------
    
+

@@ -93,7 +93,7 @@ end
 # ------------- Snapshots + Analytic overlays (depth h) -------------
 x_snap, snaps = sweSim1D.sw_KP_snapshots(N, L, valid_times; CFL = CFL,limiter = lim,ic_fun  = ic_dambreak,bfun  = bfun)
 
-plt = plot(xlabel="x", ylabel="h", legend=:topright,title="KP dry dam-break: h snapshots (numeric vs analytic)")
+plt = plot(xlabel="x", ylabel="h", legend=:topright,title="KP dam-break: h snapshots (numeric vs analytic)")
 for t in valid_times
     ηT, mT = snaps[t]
     bT = bfun(x_snap)
@@ -106,7 +106,7 @@ display(plt)
 savefig(joinpath(save_dir, "KP_snapshots.png"))
 
 # ------------- Animation (numeric + analytic, up to non-reflection Tend) -------------
-function animate_compare_KP_dry(N, L; x0, hl, hr, CFL=0.45, limiter=:mc, Tstop=0.5, fps=30, path = joinpath(save_dir, "KP_compare_dry_dambreak.gif"))
+function animate_compare_KP_dry(N, L; x0, hl, hr, CFL=0.45, limiter=:mc, Tstop=0.5, fps=30, path = joinpath(save_dir, "KP_compare_dambreak.gif"))
     g   = sweSim1D.g
     cL  = sqrt(g*hl)
     hm  = DambreakAnalytic.solve_hm(hl, hr; g=g)
