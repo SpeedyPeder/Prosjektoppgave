@@ -68,30 +68,34 @@ function fill_ghosts_outflow!(u)
     return nothing
 end
 
-# Build numerical interface fluxes with MUSCL reconstruction (periodic, upwind interface r)
+# MUSCL interface fluxes for scalar Burgers with exact Godunov flux (periodic)
 function build_fluxes!(fhat, u; limiter::Symbol = :mc)
     @assert length(fhat) == length(u)
     ε = 1e-14
     UL = similar(u); UR = similar(u)
+
+    # helper diffs
+    Δm(i) = u[i] - u[i-1]         # Δ^- U_i
+    Δp(i) = u[i+1] - u[i]         # Δ^+ U_i
+
     @inbounds for i in 2:length(u)-3
-        im1 = i-1; ip1 = i+1; ip2 = i+2
+        ip1 = i+1
+        # --- Left state at i+1/2: from cell i ---
+        rL = Δm(i) / (Δp(i) + ε)
+        ϕL = flux_limiter(rL, limiter)
+        UL[i] = u[i] + 0.5 * ϕL * Δp(i)
 
-        a_int = 0.5*(u[i] + u[ip1]) 
-        # upwind, interface-based Sweby ratio
-        r = (a_int >= 0.0) ?
-            (u[i]   - u[im1]) / ((u[ip1] - u[i]) + ε) :
-            (u[ip2] - u[ip1]) / ((u[ip1] - u[i]) + ε)
-        ϕ = flux_limiter(r, limiter)
+        # --- Right state at i+1/2: from cell i+1 ---
+        rR = Δp(ip1) / (Δm(ip1) + ε)
+        ϕR = flux_limiter(rR, limiter)
+        UR[i] = u[ip1] - 0.5 * ϕR * Δm(ip1)
 
-        # MUSCL reconstruction at i+1/2
-        UL[i] = u[i]   + 0.5*ϕ*(u[i]   - u[im1])
-        UR[i] = u[ip1] - 0.5*ϕ*(u[ip2] - u[ip1])
-
+        # Exact Godunov flux for Burgers (scalar convex flux)
         fhat[i] = godunov_flux_burgers(UL[i], UR[i])
     end
-
-    return maximum(abs.(u[3:end-2]))  # CFL from interior
+    return maximum(abs.(u[3:end-2]))  # CFL speed a_max = max |u|
 end
+
 
 @inline function euler_step!(uout, u, fhat, dt_dx)
     @inbounds for i in 3:length(u)-2
