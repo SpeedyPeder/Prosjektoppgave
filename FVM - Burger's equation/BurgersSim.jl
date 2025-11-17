@@ -71,14 +71,14 @@ end
 # MUSCL interface fluxes for scalar Burgers with exact Godunov flux (periodic)
 function build_fluxes!(fhat, u; limiter::Symbol = :mc)
     @assert length(fhat) == length(u)
-    ε = 1e-14
+    ε = 1e-16
     UL = similar(u); UR = similar(u)
 
-    # helper diffs
+    # Backward and forward differences
     Δm(i) = u[i] - u[i-1]         # Δ^- U_i
     Δp(i) = u[i+1] - u[i]         # Δ^+ U_i
 
-    @inbounds for i in 2:length(u)-3
+    @inbounds for i in 2:length(u)-2
         ip1 = i+1
         # --- Left state at i+1/2: from cell i ---
         rL = Δm(i) / (Δp(i) + ε)
@@ -86,7 +86,7 @@ function build_fluxes!(fhat, u; limiter::Symbol = :mc)
         UL[i] = u[i] + 0.5 * ϕL * Δp(i)
 
         # --- Right state at i+1/2: from cell i+1 ---
-        rR = Δp(ip1) / (Δm(ip1) + ε)
+        rR = Δm(ip1)/ (Δp(ip1) + ε)
         ϕR = flux_limiter(rR, limiter)
         UR[i] = u[ip1] - 0.5 * ϕR * Δm(ip1)
 

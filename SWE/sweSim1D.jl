@@ -35,32 +35,6 @@ end
     error("Unknown limiter $limiter")
 end
 
-#################### Bruker ikke disse fluxene lenger ##########################
-# ------------------ Riemann solvers ----------------------
-@inline function rusanov_flux(hL,uL,hR,uR)
-    mL = hL*uL; mR = hR*uR
-    FL = sw_flux(hL, mL)
-    FR = sw_flux(hR, mR)
-    cL = sqrt(g*hL); cR = sqrt(g*hR)
-    smax = max(abs(uL)+cL, abs(uR)+cR)
-    return 0.5*(FL + FR) - 0.5*smax*(SVector(hR,mR) - SVector(hL,mL))
-end
-
-@inline function hll_flux(hL,uL,hR,uR)
-    mL = hL*uL; mR = hR*uR
-    FL = sw_flux(hL, mL); FR = sw_flux(hR, mR)
-    cL = sqrt(g*hL); cR = sqrt(g*hR)
-    sL = min(uL - cL, uR - cR)
-    sR = max(uL + cL, uR + cR)
-    if sL >= 0
-        return FL
-    elseif sR <= 0
-        return FR
-    else
-        return (sR*FL - sL*FR + sL*sR*(SVector(hR,mR) - SVector(hL,mL))) / (sR - sL)
-    end
-end
-######################################################################################
 
 # --------------- Well-balanced bathy source (ghosted) ---------------
 # Linear reconstruction of bathymetry at faces and centers
@@ -247,7 +221,7 @@ end
 #----------- Adding plotting functions for KP-scheme --------------
 
 # ---------------- Output directory  for plots----------------
-const DEFAULT_OUTDIR = "Plots - KP-1D-bathymetry"
+const DEFAULT_OUTDIR = "Plots_Bathymetry"
 ensure_outdir(outdir::AbstractString=DEFAULT_OUTDIR) = (isdir(outdir) || mkpath(outdir); outdir)
 
 # ---------------- KP: Final-state plotting helper ----------------
@@ -291,13 +265,32 @@ end
 
 # ---------------- KP: Snapshots ----------------
 """
-    sw_KP_snapshots(N, L, times; CFL=0.45, limiter=:mc, ic_fun=default_ic_dambreak, bfun=default_bathymetry)
+    sw_KP_snapshots(N, L, times;
+                    CFL=0.45, limiter=:mc,
+                    ic_fun=default_ic_dambreak,
+                    bfun=default_bathymetry,
+                    makeplot=false,
+                    outdir=DEFAULT_OUTDIR,
+                    filename=nothing,
+                    save=true)
 
-Advance the KP solver and return (x, snapshots) where
-`snapshots[t] => (η, m)` at each requested time t in `times`.
+Advance the KP solver and return `(x, snapshots)` where
+`snapshots[t] => (η, m)` at each requested time `t` in `times`.
+
+If `makeplot=true`, also produces a single figure with one subplot per
+snapshot time (η and b(x) in each panel) and, if `save=true`,
+saves it to `joinpath(outdir, filename_or_default)`.
 """
-function sw_KP_snapshots(N, L, times; CFL::Float64=0.45, limiter::Symbol=:mc,
-                         ic_fun=default_ic_dambreak, bfun=default_bathymetry)
+function sw_KP_snapshots(N, L, times;
+                         CFL::Float64=0.45,
+                         limiter::Symbol=:mc,
+                         ic_fun=default_ic_dambreak,
+                         bfun=default_bathymetry,
+                         makeplot::Bool=false,
+                         outdir::AbstractString=DEFAULT_OUTDIR,
+                         filename::Union{Nothing,String}=nothing,
+                         save::Bool=true)
+
     dx = L/N
     x  = @. (0.5:1:N-0.5) * dx
 
@@ -312,20 +305,19 @@ function sw_KP_snapshots(N, L, times; CFL::Float64=0.45, limiter::Symbol=:mc,
     η2  = similar(η);  m2 = similar(m)
 
     # sort & prepare output
-    times = sort(collect(times))
+    times_vec = sort(collect(times))
     results = Dict{Float64, Tuple{Vector{Float64},Vector{Float64}}}()
     t = 0.0
-    if !isempty(times) && isapprox(times[1], 0.0; atol=1e-15)
+    if !isempty(times_vec) && isapprox(times_vec[1], 0.0; atol=1e-15)
         results[0.0] = (copy(η), copy(m))
-        times = times[2:end]
+        times_vec = times_vec[2:end]
     end
 
-    while !isempty(times)
-        target = first(times)
+    while !isempty(times_vec)
+        target = first(times_vec)
         while t < target - eps()
             Bf, Bc, _dx = build_Btilde_faces_centers(x, bfun)
 
-            # Correct: use η (not h) and pass dx positionally
             amax = build_fluxes_reflective!(H, η, m, dx; Bf=Bf, limiter=limiter)
             dt   = (amax > 0) ? min(0.8*dx/(2*amax), target - t) : (target - t)
 
@@ -341,10 +333,47 @@ function sw_KP_snapshots(N, L, times; CFL::Float64=0.45, limiter::Symbol=:mc,
             t += dt
         end
         results[target] = (copy(η), copy(m))
-        popfirst!(times)
+        popfirst!(times_vec)
     end
+
+    # ---------- Optional combined plot of all snapshots ----------
+    if makeplot
+        @eval using Plots
+        ensure_outdir(outdir)
+
+        ts = sort(collect(keys(results)))
+        ns = length(ts)
+        fig = plot(layout=(ns,1), size=(950,300*ns))
+
+        b = bfun(x)
+
+        for (k, tk) in enumerate(ts)
+            ηk, mk = results[tk]
+            hk = @. ηk - b
+            uk = similar(ηk)
+            @inbounds for i in eachindex(ηk)
+                uk[i] = (hk[i] > HMIN) ? (mk[i]/hk[i]) : 0.0
+            end
+
+            # elevation + bathymetry in panel k
+            plot!(fig[k], x, ηk, lw=2, label="η(x,t=$(round(tk,digits=2)))",
+                  xlabel="x", ylabel="elevation",
+                  title="Snapshot at t = $(round(tk,digits=3))")
+            plot!(fig[k], x, b, lw=2, ls=:dash, label="b(x)")
+        end
+
+        display(fig)
+
+        if save
+            default_name = "snapshots.png"
+            fname = something(filename, default_name)
+            savefig(fig, joinpath(outdir, fname))
+        end
+    end
+
     return x, results
 end
+
 
 # ---------------- KP: Animation ----------------
 """
@@ -425,180 +454,5 @@ function animate_sw_KP(N, L, T; CFL::Float64=0.45, limiter::Symbol=:mc,
     return x, η, m
 end
 
-
-
-####################################################################################################################################################################
-######################## Gammel kode for MUSCL-HLL eller MUSCL-Rusanov. Har byttet ut med KP-Central Upwind flux over ###############################################
-
-"""
-    sw_muscl_hll(N, L, T; CFL=0.4, limiter=:mc, solver=:hll,
-                 ic_fun=default_ic_sine, source_fun=default_source_zero,
-                 bfun=default_bathymetry)
-
-Advance to time T and return (x, h, m).
-"""
-function sw_muscl_hll(N, L, T; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=:hll,
-                      ic_fun=default_ic_sine, source_fun=default_source_zero,
-                      bfun=default_bathymetry)
-    dx = L/N
-    x  = @. (0.5:1:N-0.5) * dx
-
-    hvec, uvec = ic_fun(x)
-    h = collect(hvec)
-    m = similar(h); @inbounds for i in eachindex(h); m[i] = h[i]*uvec[i]; end
-
-    Fhat = zeros(eltype(h), length(h)+1, 2)
-    h1 = similar(h); m1 = similar(h)
-    h2 = similar(h); m2 = similar(h)
-
-    t = 0.0
-    while t < T - eps()
-        # --- Stage A: build bathymetry once and use everywhere
-        Bf, Bc, _ = build_Btilde_faces_centers(x, bfun)
-
-        amax = build_fluxes_reflective!(Fhat, h, m, dx; Bf=Bf, Bc=Bc, limiter=limiter)
-        dt = (amax > 0) ? min(CFL*dx/amax, T - t) : (T - t)
-        dt_dx = dt/dx
-
-        # Euler step + KP source using SAME (Bf,Bc)
-        @inbounds for i in eachindex(h)
-            h1[i] = h[i] - dt_dx*(Fhat[i+1,1] - Fhat[i,1])
-            m1[i] = m[i] - dt_dx*(Fhat[i+1,2] - Fhat[i,2])
-        end
-        source_fun(h1, m1, x, t)
-        bathy_source_kp07!(h1, m1, dt_dx, Bf, Bc)
-
-        # --- Stage B: rebuild fluxes at (h1,m1) with SAME rule
-        Bf, Bc, _ = build_Btilde_faces_centers(x, bfun)
-        _ = build_fluxes_reflective!(Fhat, h1, m1, dx; Bf=Bf, Bc=Bc, limiter=limiter)
-
-        # Second Euler + KP source
-        @inbounds for i in eachindex(h)
-            h2[i] = h1[i] - dt_dx*(Fhat[i+1,1] - Fhat[i,1])
-            m2[i] = m1[i] - dt_dx*(Fhat[i+1,2] - Fhat[i,2])
-        end
-        source_fun(h2, m2, x, t+dt)
-        bathy_source_kp07!(h2, m2, dt_dx, Bf, Bc)
-
-        # Heun average
-        @inbounds for i in eachindex(h)
-            h[i] = 0.5*(h[i] + h2[i])
-            m[i] = 0.5*(m[i] + m2[i])
-        end
-        t += dt
-    end
-    return x, h, m
-end
-
-
-# ------------------ Snapshot function ----------------------
-function sw_snapshots(N, L, times; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=:hll,
-                      ic_fun=default_ic_sine, source_fun=default_source_zero,
-                      bfun=default_bathymetry)
-    dx = L/N
-    x  = @. (0.5:1:N-0.5) * dx
-
-    hvec, uvec = ic_fun(x)
-    h = collect(hvec)
-    m = similar(h); @inbounds for i in eachindex(h); m[i] = h[i]*uvec[i]; end
-
-    Fhat = zeros(eltype(h), length(h)+1, 2)
-    h1 = similar(h); m1 = similar(h)
-    h2 = similar(h); m2 = similar(h)
-
-    times = sort(collect(times))
-    results = Dict{Float64, Tuple{Vector{Float64},Vector{Float64}}}()
-    t = 0.0
-    if !isempty(times) && isapprox(times[1], 0.0; atol=1e-15)
-        results[0.0] = (copy(h), copy(m))
-        times = times[2:end]
-    end
-
-    while !isempty(times)
-        target = first(times)
-        while t < target - eps()
-            b = bfun(x)
-            Bf, Bc, _ = build_Btilde_faces_centers(x, bfun)
-            amax = build_fluxes_reflective!(Fhat, h, m, dx; Bf=Bf, Bc=Bc, limiter=limiter)
-            dt = (amax > 0) ? min(CFL*dx/amax, target - t) : (target - t)
-            dt_dx = dt/dx
-
-            euler_step_reflective!(h1,m1, h,m,   Fhat, dt_dx, x, t,    source_fun, Bf, Bc)
-            _ = build_fluxes_reflective!(Fhat, h1, m1, dx; Bf=Bf, Bc=Bc, limiter=limiter)
-            euler_step_reflective!(h2,m2, h1,m1, Fhat, dt_dx, x, t+dt, source_fun, Bf, Bc)
-        
-
-            @inbounds for i in eachindex(h)
-                h[i] = 0.5*(h[i] + h2[i])
-                m[i] = 0.5*(m[i] + m2[i])
-            end
-            t += dt
-        end
-        results[target] = (copy(h), copy(m))
-        times = times[2:end]
-    end
-    return x, results
-end
-
-# ------------------ Animation function ----------------------
-function animate_sw(N, L, T; CFL=0.4, limiter::Symbol=:mc, solver::Symbol=:hll,
-                    ic_fun=default_ic_sine, source_fun=default_source_zero, bfun=default_bathymetry,
-                    fps::Integer=30, ylim_h=(0.0,2.0), ylim_u=(-2.0,2.0),
-                    path::AbstractString="shallow_water.gif")
-    @eval using Plots
-    x, h, m = sw_muscl_hll(N, L, 0.0; CFL=CFL, limiter=limiter,
-                           ic_fun=ic_fun, source_fun=source_fun, bfun=bfun)
-    b = bfun(x)
-
-    anim = Animation()
-    t = 0.0
-    dx = L/N
-    Fhat = zeros(eltype(h), length(h)+1, 2)
-    h1 = similar(h); m1 = similar(h)
-    h2 = similar(h); m2 = similar(h)
-
-    while t < T - eps()
-        # frame
-        u = similar(h); @inbounds for i in eachindex(h); u[i] = m[i]/h[i] ; end
-        η = h .+ b
-        p1 = plot(x, η, xlabel="x", ylabel="elevation", ylim=ylim_h, label="η=h+b",
-                  title="t=$(round(t,digits=3))")
-        plot!(p1, x, b, label="b(x)", ls=:dash)
-        p2 = plot(x, u, xlabel="x", ylabel="u", ylim=ylim_u, label=false)
-        frame(anim, plot(p1, p2, layout=(2,1)))
-
-        # step
-        Bf, Bc, _ = build_Btilde_faces_centers(x, bfun)
-        amax = build_fluxes_reflective!(Fhat, h, m, dx; Bf=Bf, Bc=Bc, limiter=limiter)
-        dt = (amax > 0) ? min(CFL*dx/amax, T - t) : (T - t)
-        dt_dx = dt/dx
-
-        euler_step_reflective!(h1,m1, h,m,   Fhat, dt_dx, x, t,    source_fun, Bf, Bc)
-        _ = build_fluxes_reflective!(Fhat, h1, m1, dx; Bf=Bf, Bc=Bc, limiter=limiter)
-        euler_step_reflective!(h2,m2, h1,m1, Fhat, dt_dx, x, t+dt, source_fun, Bf, Bc)
-
-        @inbounds for i in eachindex(h)
-            h[i] = 0.5*(h[i] + h2[i])
-            m[i] = 0.5*(m[i] + m2[i])
-        end
-        t += dt
-    end
-
-    gif(anim, path, fps=fps)
-    return x, h, m
-end
-# ------------------ Public API -----------------------------
-function default_ic_dambreak(x; hl=1.0, hr=0.0, ul=0.0, ur=0.0, xc=0.5)
-    h = map(xi-> (xi < xc ? hl : hr), x)
-    u = map(xi-> (xi < xc ? ul : ur), x)
-    return h, u
-end
-
-function default_ic_sine(x; h0=1.0, amp=0.1, u0=0.0)
-    h = @. h0 + amp*sin(2π*x)
-    u = fill(u0, length(x))
-    return h, u
-end
-default_source_zero(h, m, x, t) = nothing
 
 end # module
