@@ -10,12 +10,6 @@ export sw_KP_upwind, sw_KP_snapshots, animate_sw_KP, kp_plot_final,
 const g = 9.81
 const HMIN = 1e-12 # For dry-wet region handling, but is not necessary for the test examples here
 
-@inline cons(h,u) = SVector(h, h*u)
-
-@inline function sw_flux(h, m)
-    u = m/h
-    return SVector(m, m*u + 0.5*g*h*h)
-end
 
 default_bathymetry(x) = zeros(length(x))
 

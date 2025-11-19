@@ -50,173 +50,355 @@ end
     error("Unknown limiter $(limiter). Use :minmod or :vanalbada.")
 end
 
+
 # =========================
-# Boundary helpers
+# Reconstruction
 # =========================
-function set_periodic!(A::AbstractMatrix)
-    nx,ny = size(A)
-    A[1,:]  .= A[nx-1,:];   A[nx,:] .= A[2,:]
-    A[:,1]  .= A[:,ny-1];   A[:,ny] .= A[:,2]
-    return A
-end
-
-function set_reflective!(h, qx, qy, b, f)
-    nx,ny = size(h)
-    # Left/right
-    h[1,:]   .=  h[2,:];          h[nx,:]  .=  h[nx-1,:]
-    qx[1,:]  .= -qx[2,:];         qx[nx,:] .= -qx[nx-1,:]
-    qy[1,:]  .=  qy[2,:];         qy[nx,:] .=  qy[nx-1,:]
-    b[1,:]   .=  b[2,:];          b[nx,:]  .=  b[nx-1,:]
-    f[1,:]   .=  f[2,:];          f[nx,:]  .=  f[nx-1,:]
-    # Bottom/top
-    h[:,1]   .=  h[:,2];          h[:,ny]  .=  h[:,ny-1]
-    qy[:,1]  .= -qy[:,2];         qy[:,ny] .= -qy[:,ny-1]
-    qx[:,1]  .=  qx[:,2];         qx[:,ny] .=  qx[:,ny-1]
-    b[:,1]   .=  b[:,2];          b[:,ny]  .=  b[:,ny-1]
-    f[:,1]   .=  f[:,2];          f[:,ny]  .=  f[:,ny-1]
-    return
-end
-
-function set_outflow!(h, qx, qy, b, f; no_inflow::Bool=true)
-    nx, ny = size(h)
-    # Left/right: copy values
-    h[1,:]  .= h[2,:];       h[nx,:] .= h[nx-1,:]
-    qx[1,:] .= qx[2,:];      qx[nx,:] .= qx[nx-1,:]
-    qy[1,:] .= qy[2,:];      qy[nx,:] .= qy[nx-1,:]
-    b[1,:]  .= b[2,:];       b[nx,:]  .= b[nx-1,:]
-    f[1,:]  .= f[2,:];       f[nx,:]  .= f[nx-1,:]
-    # Bottom/top: copy values
-    h[:,1]  .= h[:,2];       h[:,ny] .= h[:,ny-1]
-    qy[:,1] .= qy[:,2];      qy[:,ny] .= qy[:,ny-1]
-    qx[:,1] .= qx[:,2];      qx[:,ny] .= qx[:,ny-1]
-    b[:,1]  .= b[:,2];       b[:,ny]  .= b[:,ny-1]
-    f[:,1]  .= f[:,2];       f[:,ny]  .= f[:,ny-1]
-
-    if no_inflow
-        @. qx[1,:] = min(qx[1,:], 0.0)
-        @. qx[nx,:] = max(qx[nx,:], 0.0)
-        @. qy[:,1] = min(qy[:,1], 0.0)
-        @. qy[:,ny] = max(qy[:,ny], 0.0)
+#Bathymetry
+function build_Btilde(x, y, bfun)
+    Nx, Ny = length(x), length(y)
+    dx = x[2]-x[1]
+    dy = y[2]-y[1]
+    #1) build bathymetry at corners
+    xC = range(x[1]-dx/2, x[end]+dx/2, length=Nx+1)
+    yC = range(y[1]-dy/2, y[end]+dy/2, length=Ny+1)
+    Bcorner = [bfun(xC[j], yC[k]) for j in 1:Nx+1, k in 1:Ny+1 ]
+    #2) build bathymetry at face midpoints
+    Bfx = Array{Float64}(undef, Nx+1, Ny)
+    for j in 1:Nx+1, k in 1:Ny
+        Bfx[j,k] = 0.5*(Bcorner[j,k+1] + Bcorner[j,k]) 
     end
-    return
+    Bfy = Array{Float64}(undef, Nx, Ny+1)
+    for j in 1:Nx, k in 1:Ny+1
+        Bfy[j,k] = 0.5*(Bcorner[j+1,k] + Bcorner[j,k]) 
+    end
+    #3) build bathymetry at cell centers
+    Bc = Array{Float64}(undef, Nx, Ny)
+    for j in 1:Nx, k in 1:Ny
+        Bc[j,k] = 0.25*(Bfx[j,k] + Bfx[j+1,k] + Bfy[j,k] + Bfy[j,k+1]) #(j,k) → (j-1/2,k-1/2)
+    end
+    return Bc, Bfx, Bfy, dx, dy
+end
+
+#Velocities
+function build_velocities(x, y, h, qx, qy, Hmin)
+    Nx, Ny = length(x), length(y)
+    u = Array{Float64}(undef, Nx, Ny)
+    v = Array{Float64}(undef, Nx, Ny)
+    for j in 1:Nx, k in 1:Ny
+        if h[j,k] < Hmin #Desingularize
+            dx = x[2]-x[1]
+            epsilon = (dx)^4
+            u[j,k] = (sqrt(2)*h[j,k]*qx[j,k]) / sqrt(h[j,k]^4 + max(h[j,k]^4, epsilon))
+            v[j,k] = (sqrt(2)*h[j,k]*qy[j,k]) / sqrt(h[j,k]^4 + max(h[j,k]^4, epsilon))
+            #Recalculate discharge
+            qx[j,k] = h[j,k]*u[j,k]
+            qy[j,k] = h[j,k]*v[j,k]
+        else
+            u[j,k] = qx[j,k] / (h[j,k])
+            v[j,k] = qy[j,k] / (h[j,k])
+    end
+    return u, v
+end
+
+#Build Coriolis parameter f = f_hat + \beta y_k
+function build_f(x,y,f_hat, beta)
+    Nx, Ny = length(x), length(y)
+    f = Array{Float64}(undef, Nx, Ny)
+    for j in 1:Nx, k in 1:Ny
+        f[j,k] = f_hat + beta * y[k]
+    end
+    return f
+end
+
+# Primitives U_y = f/g * u and V_x = f/g * v 
+function build_UV_KL(u::AbstractMatrix,
+                     v::AbstractMatrix,
+                     f::AbstractMatrix,
+                     Bc::AbstractMatrix,
+                     h::AbstractMatrix,
+                     dx::Real, dy::Real, g::Real)
+
+    Nx, Ny = size(u)
+    @assert size(v)  == (Nx,Ny)
+    @assert size(f)  == (Nx,Ny)
+    @assert size(Bc) == (Nx,Ny)
+    @assert size(h) == (Nx,Ny)
+    
+    Uface = zeros(Float64, Nx, Ny+1)  
+    for j in 1:Nx
+        for k in 1:Ny
+            Uface[j,k+1] = Uface[j,k] + (f[j,k]/g) * u[j,k] * dy
+        end
+    end
+
+    Vface = zeros(Float64, Nx+1, Ny)
+    for j in 1:Nx
+        for k in 1:Ny
+            Vface[j+1,k] = Vface[j,k] + (f[j,k]/g) * v[j,k] * dx
+        end
+    end
+
+    #Cell-centered U and V:
+    Uc = zeros(Float64, Nx, Ny)
+    Vc = zeros(Float64, Nx, Ny)
+    for j in 1:Nx, k in 1:Ny
+        Uc[j,k] = 0.5 * (Uface[j,k]   + Uface[j,k+1])
+        Vc[j,k] = 0.5 * (Vface[j,k]   + Vface[j+1,k])
+    end
+
+    K = similar(Bc)
+    L = similar(Bc)
+    for j in 1:Nx, k in 1:Ny
+        K[j,k] = g * (h[j,k] + Bc[j,k] - Vc[j,k])
+        L[j,k] = g * (h[j,k] + Bc[j,k] + Uc[j,k])
+    end
+    return Uface, Vface, Uc, Vc, K, L
+end
+
+# Compute limited slopes for u, v, K, and L in x- and y-directions
+function slopes_p2D!(
+    σx_u, σx_v, σx_K, σx_L,
+    σy_u, σy_v, σy_K, σy_L,
+    ug, vg, Kg, Lg;
+    limiter::Symbol = :minmod,
+)
+    Nx2, Ny2 = size(ug)
+    @assert size(vg) == (Nx2, Ny2)
+    @assert size(Kg) == (Nx2, Ny2)
+    @assert size(Lg) == (Nx2, Ny2)
+
+    Nx = Nx2 - 2          # number of interior cells in x
+    Ny = Ny2 - 2          # number of interior cells in y
+    @inbounds for i in 2:Nx+1, j in 2:Ny+1
+        # x-direction slopes
+        σx_u[i,j] = slope_limited(ug[i-1,j], ug[i,j], ug[i+1,j], limiter)
+        σx_v[i,j] = slope_limited(vg[i-1,j], vg[i,j], vg[i+1,j], limiter)
+        σx_K[i,j] = slope_limited(Kg[i-1,j], Kg[i,j], Kg[i+1,j], limiter)
+        σx_L[i,j] = slope_limited(Lg[i-1,j], Lg[i,j], Lg[i+1,j], limiter)
+
+        # y-direction slopes
+        σy_u[i,j] = slope_limited(ug[i,j-1], ug[i,j], ug[i,j+1], limiter)
+        σy_v[i,j] = slope_limited(vg[i,j-1], vg[i,j], vg[i,j+1], limiter)
+        σy_K[i,j] = slope_limited(Kg[i,j-1], Kg[i,j], Kg[i,j+1], limiter)
+        σy_L[i,j] = slope_limited(Lg[i,j-1], Lg[i,j], Lg[i,j+1], limiter)
+    end
+    return nothing
 end
 
 
-set_periodic!(st::State)   = (set_periodic!(st.h); set_periodic!(st.qx); set_periodic!(st.qy);
-                             set_periodic!(st.b); set_periodic!(st.f); set_periodic!(st.η))
-set_reflective!(st::State) = set_reflective!(st.h, st.qx, st.qy, st.b, st.f)
-set_outflow!(st::State, kwargs...) = set_outflow!(st.h, st.qx, st.qy, st.b, st.f, kwargs...)
+##########################
+# 2D slopes for u,v,K,L  #
+##########################
+function slopes_p2D!(
+    σx_u, σx_v, σx_K, σx_L,
+    σy_u, σy_v, σy_K, σy_L,
+    ug, vg, Kg, Lg;
+    limiter::Symbol = :minmod,
+)
+    Nx2, Ny2 = size(ug)
+    @assert size(vg) == (Nx2, Ny2)
+    @assert size(Kg) == (Nx2, Ny2)
+    @assert size(Lg) == (Nx2, Ny2)
 
-# =========================
-# Allocation / init
-# =========================
-function initialize_state(nx,ny)
-    H   = zeros(nx,ny); QX = zeros(nx,ny); QY = zeros(nx,ny)
-    B   = zeros(nx,ny); F  = zeros(nx,ny); ETA = zeros(nx,ny)
-    Fx  = fill((0.0,0.0,0.0), nx-1, ny)   # faces i=1..nx-1
-    Gy  = fill((0.0,0.0,0.0), nx,   ny-1) # faces j=1..ny-1
-    return State(H,QX,QY,B,F,ETA,Fx,Gy)
+    Nx = Nx2 - 2          # number of interior cells in x
+    Ny = Ny2 - 2          # number of interior cells in y
+
+    @inbounds for i in 2:Nx+1, j in 2:Ny+1
+        # x-direction slopes
+        σx_u[i,j] = slope_limited(ug[i-1,j], ug[i,j], ug[i+1,j], limiter)
+        σx_v[i,j] = slope_limited(vg[i-1,j], vg[i,j], vg[i+1,j], limiter)
+        σx_K[i,j] = slope_limited(Kg[i-1,j], Kg[i,j], Kg[i+1,j], limiter)
+        σx_L[i,j] = slope_limited(Lg[i-1,j], Lg[i,j], Lg[i+1,j], limiter)
+
+        # y-direction slopes
+        σy_u[i,j] = slope_limited(ug[i,j-1], ug[i,j], ug[i,j+1], limiter)
+        σy_v[i,j] = slope_limited(vg[i,j-1], vg[i,j], vg[i,j+1], limiter)
+        σy_K[i,j] = slope_limited(Kg[i,j-1], Kg[i,j], Kg[i,j+1], limiter)
+        σy_L[i,j] = slope_limited(Lg[i,j-1], Lg[i,j], Lg[i,j+1], limiter)
+    end
+
+    return nothing
+end
+
+# Reconstruct using piecewise-linear reconstruction with slope limiting
+function reconstruct_p(u, v, K, L; limiter::Symbol = :minmod)
+    Nx, Ny = size(u)
+    @assert size(v) == (Nx,Ny)
+    @assert size(K) == (Nx,Ny)
+    @assert size(L) == (Nx,Ny)
+
+    # Allocate ghosts and set reflective BCs
+    ug = zeros(Float64, Nx+2, Ny+2)
+    vg = zeros(Float64, Nx+2, Ny+2)
+    Kg = zeros(Float64, Nx+2, Ny+2)
+    Lg = zeros(Float64, Nx+2, Ny+2)
+    @inbounds begin
+        ug[2:Nx+1, 2:Ny+1] .= u
+        vg[2:Nx+1, 2:Ny+1] .= v
+        Kg[2:Nx+1, 2:Ny+1] .= K
+        Lg[2:Nx+1, 2:Ny+1] .= L
+    end
+
+    # Set reflective BCs
+    @inbounds begin
+        # left/right boundaries
+        ug[1,  :] .= -ug[2,  :]     
+        ug[end,:] .= -ug[end-1, :] 
+        vg[1,  :] .=  vg[2,  :]      
+        vg[end,:] .=  vg[end-1, :]
+        Kg[1,  :] .=  Kg[2,  :]    
+        Kg[end,:] .=  Kg[end-1, :]
+        Lg[1,  :] .=  Lg[2,  :]
+        Lg[end,:] .=  Lg[end-1, :]
+
+        # bottom/top boundaries
+        ug[:, 1]  .=  ug[:, 2]     
+        ug[:, end].=  ug[:, end-1]
+        vg[:, 1]  .= -vg[:, 2]      
+        vg[:, end].= -vg[:, end-1]
+        Kg[:, 1]  .=  Kg[:, 2]
+        Kg[:, end].=  Kg[:, end-1]
+        Lg[:, 1]  .=  Lg[:, 2]
+        Lg[:, end].=  Lg[:, end-1]
+    end
+
+    # Allocate slope arrays
+    σx_u = zeros(Float64, Nx+2, Ny+2); σx_v = zeros(Float64, Nx+2, Ny+2); σx_K = zeros(Float64, Nx+2, Ny+2); σx_L = zeros(Float64, Nx+2, Ny+2)
+    σy_u = zeros(Float64, Nx+2, Ny+2); σy_v = zeros(Float64, Nx+2, Ny+2); σy_K = zeros(Float64, Nx+2, Ny+2); σy_L = zeros(Float64, Nx+2, Ny+2)
+
+    #Compute slopes
+    slopes_p2D!(σx_u, σx_v, σx_K, σx_L,
+                σy_u, σy_v, σy_K, σy_L,
+                ug, vg, Kg, Lg; limiter=limiter)
+
+    # Allocate interface arrays 
+    uE = similar(u); uW = similar(u); uN = similar(u); uS = similar(u)
+    vE = similar(v); vW = similar(v); vN = similar(v); vS = similar(v)
+    KE = similar(K); KW = similar(K); KN = similar(K); KS = similar(K)
+    LE = similar(L); LW = similar(L); LN = similar(L); LS = similar(L)
+
+    # Reconstruct
+    @inbounds for i in 1:Nx, j in 1:Ny
+        #Shifted indices for ghosts
+        I = i + 1
+        J = j + 1
+
+        # x-faces
+        uE[i,j] = ug[I,J] + 0.5*σx_u[I,J]
+        uW[i,j] = ug[I,J] - 0.5*σx_u[I,J]
+        vE[i,j] = vg[I,J] + 0.5*σx_v[I,J]
+        vW[i,j] = vg[I,J] - 0.5*σx_v[I,J]
+        KE[i,j] = Kg[I,J] + 0.5*σx_K[I,J]
+        KW[i,j] = Kg[I,J] - 0.5*σx_K[I,J]
+        LE[i,j] = Lg[I,J] + 0.5*σx_L[I,J]
+        LW[i,j] = Lg[I,J] - 0.5*σx_L[I,J]
+
+        # y-faces
+        uN[i,j] = ug[I,J] + 0.5*σy_u[I,J]
+        uS[i,j] = ug[I,J] - 0.5*σy_u[I,J]
+        vN[i,j] = vg[I,J] + 0.5*σy_v[I,J]
+        vS[i,j] = vg[I,J] - 0.5*σy_v[I,J]
+        KN[i,j] = Kg[I,J] + 0.5*σy_K[I,J]
+        KS[i,j] = Kg[I,J] - 0.5*σy_K[I,J]
+        LN[i,j] = Lg[I,J] + 0.5*σy_L[I,J]
+        LS[i,j] = Lg[I,J] - 0.5*σy_L[I,J]
+    end
+
+    return uE,uW,uN,uS,
+           vE,vW,vN,vS,
+           KE,KW,KN,KS,
+           LE,LW,LN,LS
+end
+
+function reconstruct_h(h, Uf, Vf, KE, KW, LN, LS, Bfx, Bfy)
+    Nx, Ny = size(h)
+    @assert size(Uf) == (Nx, Ny+1)
+    @assert size(Vf) == (Nx+1, Ny)
+    @assert size(KE)  == (Nx, Ny)
+    @assert size(KW)  == (Nx, Ny)
+    @assert size(LN)  == (Nx, Ny)
+    @assert size(LS)  == (Nx, Ny)
+    @assert size(Bfx) == (Nx+1, Ny)
+    @assert size(Bfy) == (Nx, Ny+1)
+    #Should not need ghosts here because h are reconstructed using K and L which have already been reconstructed with ghosts
+    hE = similar(h); hW = similar(h); hN = similar(h); hS = similar(h)
+    @inbounds for j in 1:Nx, k in 1:Ny
+        hE[j,k] = KE[j,k]/g + Vf[j+1,k] - Bfx[j+1,k]
+        hW[j,k] = KW[j,k]/g + Vf[j,k]   - Bfx[j,k]
+        hN[j,k] = LN[j,k]/g - Uf[j,k+1] - Bfy[j,k+1]
+        hS[j,k] = LS[j,k]/g - Uf[j,k]   - Bfy[j,k]
+    end
+    return hE,hW,hN,hS
 end
 
 # =========================
 # Fluxes (central-upwind)
 # =========================
-@inline _c(g,h) = sqrt(g*max(h,0.0))
-
-# periodic index wrap to 1..n (SAFE; mod not %)
-@inline wrap(i, n) = mod(i - 1, n) + 1
-
+#Build F for the reconstructed variables
 """
-Build x-face fluxes Fx[i,j] for the face between cells i and i+1.
+    flux_x_cu!(F1, F2, F3,
+               hE, hW, uE, uW, vE, vW, g)
 
-Reconstruction variable is η = h + b (well-balanced friendly).
-Left state at i+1/2  uses slope at cell i   from (i-1, i, i+1).
-Right state at i+1/2 uses slope at cell i+1 from (i, i+1, i+2).
+Compute x-direction CU fluxes F = (F^(1),F^(2),F^(3)) at faces x_{i+1/2,j},
+using reconstructed interface states from the KP07 reconstruction:
 
-Speeds:
-  a⁺ = max(0, u_L + c_L, u_R + c_R),
-  a⁻ = min(0, u_L - c_L, u_R - c_R)
+  left state  at i+1/2,j : (hE[i,j], uE[i,j], vE[i,j])
+  right state at i+1/2,j : (hW[i+1,j], uW[i+1,j], vW[i+1,j])
 
-Central-upwind flux (KT/KP):
-  F̂ = (a⁺ F(U_L) - a⁻ F(U_R)) / (a⁺-a⁻) + (a⁺ a⁻)/(a⁺-a⁻) * (U_R - U_L)
+Array sizes:
+  hE,hW,uE,uW,vE,vW :: (Nx, Ny)
+  F1,F2,F3          :: (Nx+1, Ny)   (faces i = 1..Nx+1, between cells)
+
+We only fill interior faces i = 2..Nx (between cell i-1 and i).
+Boundary faces (i=1 and i=Nx+1) should be set by BCs.
 """
-function _flux_x!(Fx, h,qx,qy,b,η, p::Params)
-    nx,ny = size(h); g = p.g
-    if p.bc === :periodic
-        for j in 1:ny, i in 1:nx-1
-            im1 = wrap(i-1, nx)    # i-1
-            ip1 = wrap(i+1, nx)    # i+1
-            ip2 = wrap(i+2, nx)    # i+2
-            # Reconstruct η at face i+1/2
-            sL     = slope_limited(η[im1,j], η[i,j],   η[ip1,j], p.limiter)
-            sR     = slope_limited(η[i,j],   η[ip1,j], η[ip2,j], p.limiter)
-            # η at face
-            ηLface = η[i,j]   + 0.5*sL
-            ηRface = η[ip1,j] - 0.5*sR
-            # height
-            hL = max(ηLface - b[i,j],    0.0)
-            hR = max(ηRface - b[ip1,j],  0.0)
-            # Momentum in x and y directions
-            qxL, qxR = qx[i,j],   qx[ip1,j]
-            qyL, qyR = qy[i,j],   qy[ip1,j]
-            # Velocities
-            uL = hL>0 ? qxL/hL : 0.0;  vL = hL>0 ? qyL/hL : 0.0
-            uR = hR>0 ? qxR/hR : 0.0;  vR = hR>0 ? qyR/hR : 0.0
-            cL = _c(g,hL); cR = _c(g,hR)
-            # Coefficients for flux update
-            ap = max(0.0, max(uL + cL, uR + cR))
-            am = min(0.0, min(uL - cL, uR - cR))
-            denom = ap - am
-            if denom <= 1e-14
-                Fx[i,j] = (0.0,0.0,0.0)
-                continue
-            end
+function build_F!(F1, F2, F3,
+                    hE, hW, uE, uW, vE, vW, g)
+    Nx, Ny = size(hE)
+    @assert size(hW) == (Nx,Ny)
+    @assert size(uE) == (Nx,Ny) == size(uW) == size(vE) == size(vW)
+    @assert size(F1) == (Nx+1,Ny)
+    @assert size(F2) == (Nx+1,Ny)
+    @assert size(F3) == (Nx+1,Ny)
+    @inbounds for i in 1:Nx-1, j in 1:Ny
+        #Calculate left and right states
+        hL = hE[i,j]; uL = uE[i,j]; vL = vE[i,j]
+        hR = hW[i+1,j]; uR = uW[i+1,j]; vR = vW[i+1,j]
+        cL = sqrt(g*max(hL,0.0))
+        cR = sqrt(g*max(hR,0.0))
+        #One sided speeds
+        ap = max(0.0, uL + cL, uR + cR)
+        am = min(0.0, uL - cL, uR - cR)
+        denom = ap - am
 
-            # Physical fluxes F(U) in x-direction 
-            FL1, FL2, FL3 = qxL, (hL>0 ? qxL*uL + 0.5*g*hL*hL : 0.0), (hL>0 ? qxL*vL : 0.0)
-            FR1, FR2, FR3 = qxR, (hR>0 ? qxR*uR + 0.5*g*hR*hR : 0.0), (hR>0 ? qxR*vR : 0.0)
-            f1 = (ap*FL1 - am*FR1)/denom + (ap*am/denom)*(hR  - hL)
-            f2 = (ap*FL2 - am*FR2)/denom + (ap*am/denom)*(qxR - qxL)
-            f3 = (ap*FL3 - am*FR3)/denom + (ap*am/denom)*(qyR - qyL)
-            Fx[i,j] = (f1,f2,f3)  # Stored i+1/2 at index i
+        fi = i+1
+        if denom <= 1e-14 #If difference in wave speeds is too small, set fluxes to zero
+            F1[fi,j] = 0.0
+            F2[fi,j] = 0.0
+            F3[fi,j] = 0.0
+            continue
         end
-    else
-        # Outflow/reflective: compute ALL faces 1..nx-1 with clamped stencil
-        for j in 1:ny, i in 1:nx-1
-            im1 = max(i-1, 1)
-            ip1 = i+1            # in 1..nx
-            ip2 = min(i+2, nx)
+        #Calculate discharges
+        qxL = hL*uL; qxR = hR*uR
+        FL1 = qxL
+        FL2 = qxL*uL + 0.5*g*hL*hL
+        FR1 = qxR
+        FR2 = qxR*uR + 0.5*g*hR*hR
 
-            # Reconstruct η at face i+1/2 with clamped neighbors
-            sL     = slope_limited(η[im1,j], η[i,j],   η[ip1,j], p.limiter)
-            sR     = slope_limited(η[i,j],   η[ip1,j], η[ip2,j], p.limiter)
-            ηLface = η[i,j]   + 0.5*sL
-            ηRface = η[ip1,j] - 0.5*sR
-            hL = max(ηLface - b[i,j],    0.0)
-            hR = max(ηRface - b[ip1,j],  0.0)
-            qxL, qxR = qx[i,j],   qx[ip1,j]
-            qyL, qyR = qy[i,j],   qy[ip1,j]
-            #Velocities
-            uL = hL>0 ? qxL/hL : 0.0;  vL = hL>0 ? qyL/hL : 0.0
-            uR = hR>0 ? qxR/hR : 0.0;  vR = hR>0 ? qyR/hR : 0.0
-            cL = _c(p.g,hL); cR = _c(p.g,hR)
-            ap = max(0.0, max(uL + cL, uR + cR))
-            am = min(0.0, min(uL - cL, uR - cR))
-            denom = ap - am
-            if denom <= 1e-14
-                Fx[i,j] = (0.0,0.0,0.0)
-                continue
-            end
-            # Fluxes F(U) in x-direction
-            FL1, FL2, FL3 = qxL, (hL>0 ? qxL*uL + 0.5*p.g*hL*hL : 0.0), (hL>0 ? qxL*vL : 0.0)
-            FR1, FR2, FR3 = qxR, (hR>0 ? qxR*uR + 0.5*p.g*hR*hR : 0.0), (hR>0 ? qxR*vR : 0.0)
-            f1 = (ap*FL1 - am*FR1)/denom + (ap*am/denom)*(hR  - hL)
-            f2 = (ap*FL2 - am*FR2)/denom + (ap*am/denom)*(qxR - qxL)
-            f3 = (ap*FL3 - am*FR3)/denom + (ap*am/denom)*(qyR - qyL)
-            Fx[i,j] = (f1,f2,f3)
+        # F^(1), F^(2): CU (3.2)–(3.3)
+        F1[fi,j] = (ap*FL1 - am*FR1)/denom + (ap*am/denom)*(hR  - hL)
+        F2[fi,j] = (ap*FL2 - am*FR2)/denom + (ap*am/denom)*(qxR - qxL)
+
+        # F^(3): upwind hvu (3.4)
+        if uL + uR > 0.0
+            F3[fi,j] = hL*uL*vL
+        else
+            F3[fi,j] = hR*uR*vR
         end
     end
-    return
+
+    return nothing
 end
 
 """

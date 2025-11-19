@@ -42,7 +42,7 @@ _ = BurgersSim.animate_burgers(N, L, T; CFL=CFL, limiter=:mc, fps=30, path=gifpa
 
 # --- Compare different FV methods (analytic vs numeric) ---
 # smaller grid to highlight smearing/oscillations
-N, L, CFL, T = 50, 1, 0.6, 1
+N, L, CFL, T = 50, 5, 0.6, 5
 
 BurgersSim.burgers_compare_at(N, L, T; CFL,
     method=:upwind, show_analytic=true,
