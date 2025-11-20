@@ -1,11 +1,13 @@
 module RotSW_CDKLM
 
-export Params, State, step_rk2!
+export Params, State, step_RK2!, init_state
 
 # =========================
 # Parameters & State
 # =========================
 struct Params
+    x::Vector{Float64}  # x-grid points
+    y::Vector{Float64}  # y-grid points
     nx::Int          # number of physical cells in x
     ny::Int          # number of physical cells in y
     dx::Float64      # grid spacing in x
@@ -22,6 +24,7 @@ mutable struct State
     h::Array{Float64,2}   # depth h(i,j)
     hu::Array{Float64,2}  # x-momentum h*u
     hv::Array{Float64,2}  # y-momentum h*v
+    q::Array{Float64,3}   # combined state array (3, nx, ny)
 
     # --- bathymetry ---
     Bc::Array{Float64,2}        # bottom at cell centres    (nx,   ny)
@@ -92,30 +95,36 @@ function build_Btilde(x, y, bfun)
     for j in 1:Nx, k in 1:Ny
         Bc[j,k] = 0.25*(Bfx[j,k] + Bfx[j+1,k] + Bfy[j,k] + Bfy[j,k+1]) #(j,k) → (j-1/2,k-1/2)
     end
-    return Bc, Bfx, Bfy, Bcorner, dx, dy
+    return Bc, Bfx, Bfy, Bcorner
 end
 
-#Velocities
-function build_velocities(x, y, h, qx, qy, Hmin)
-    Nx, Ny = length(x), length(y)
-    u = Array{Float64}(undef, Nx, Ny)
-    v = Array{Float64}(undef, Nx, Ny)
-    for j in 1:Nx, k in 1:Ny
-        if h[j,k] < Hmin #Desingularize
-            dx = x[2]-x[1]
-            epsilon = (dx)^4
-            u[j,k] = (sqrt(2)*h[j,k]*qx[j,k]) / sqrt(h[j,k]^4 + max(h[j,k]^4, epsilon))
-            v[j,k] = (sqrt(2)*h[j,k]*qy[j,k]) / sqrt(h[j,k]^4 + max(h[j,k]^4, epsilon))
-            #Recalculate discharge
-            qx[j,k] = h[j,k]*u[j,k]
-            qy[j,k] = h[j,k]*v[j,k]
+function build_velocities(x, y, h, hu, hv, Hmin)
+    nx, ny = size(h)
+    u = zeros(nx, ny)
+    v = zeros(nx, ny)
+    dx = x[2] - x[1]
+    dy = y[2] - y[1]
+    eps = dx^4
+    @inbounds for i in 1:nx, j in 1:ny
+        hij = h[i,j]
+        if hij < Hmin
+            h4 = hij^4
+            denom = h4 + max(h4, eps)
+            s = sqrt(denom)
+            uij = (sqrt(2)*hij*hu[i,j]) / s
+            vij = (sqrt(2)*hij*hv[i,j]) / s
+            u[i,j] = uij
+            v[i,j] = vij
+            hu[i,j] = hij * uij
+            hv[i,j] = hij * vij
         else
-            u[j,k] = qx[j,k] / (h[j,k])
-            v[j,k] = qy[j,k] / (h[j,k])
+            u[i,j] = hu[i,j] / hij
+            v[i,j] = hv[i,j] / hij
         end
     end
     return u, v
 end
+
 
 #Build Coriolis parameter f = f_hat + \beta y_k
 function build_f(x, y, f_hat, beta)
@@ -129,41 +138,25 @@ end
 
 # Primitives U_y = f/g * u and V_x = f/g * v 
 function build_UV_KL(h, u, v, f, Bc, dx, dy, g)
-
     Nx, Ny = size(u)
-    @assert size(v)  == (Nx,Ny)
-    @assert size(f)  == (Nx,Ny)
-    @assert size(Bc) == (Nx,Ny)
-    @assert size(h) == (Nx,Ny)
-    
-    Uface = zeros(Float64, Nx, Ny+1)  
-    for j in 1:Nx
-        for k in 1:Ny
-            Uface[j,k+1] = Uface[j,k] + (f[j,k]/g) * u[j,k] * dy
-        end
+    Uface = zeros(Float64, Nx, Ny+1)
+    @inbounds for i in 1:Nx, j in 1:Ny
+        Uface[i,j+1] = Uface[i,j] + (f[i,j]/g) * u[i,j] * dy
     end
-
     Vface = zeros(Float64, Nx+1, Ny)
-    for j in 1:Nx
-        for k in 1:Ny
-            Vface[j+1,k] = Vface[j,k] + (f[j,k]/g) * v[j,k] * dx
-        end
+    @inbounds for j in 1:Ny, i in 1:Nx
+        Vface[i+1,j] = Vface[i,j] + (f[i,j]/g) * v[i,j] * dx
+    end
+    Uc = @. 0.5 * (Uface[:,1:end-1] + Uface[:,2:end])
+    Vc = @. 0.5 * (Vface[1:end-1,:] + Vface[2:end,:])
+
+    K = similar(h)
+    L = similar(h)
+    @inbounds for i in 1:Nx, j in 1:Ny
+        K[i,j] = g*(h[i,j] + Bc[i,j] - Vc[i,j])
+        L[i,j] = g*(h[i,j] + Bc[i,j] + Uc[i,j])
     end
 
-    #Cell-centered U and V:
-    Uc = zeros(Float64, Nx, Ny)
-    Vc = zeros(Float64, Nx, Ny)
-    for j in 1:Nx, k in 1:Ny
-        Uc[j,k] = 0.5 * (Uface[j,k]   + Uface[j,k+1])
-        Vc[j,k] = 0.5 * (Vface[j,k]   + Vface[j+1,k])
-    end
-
-    K = similar(Bc)
-    L = similar(Bc)
-    for j in 1:Nx, k in 1:Ny
-        K[j,k] = g * (h[j,k] + Bc[j,k] - Vc[j,k])
-        L[j,k] = g * (h[j,k] + Bc[j,k] + Uc[j,k])
-    end
     return Uface, Vface, Uc, Vc, K, L
 end
 
@@ -432,8 +425,10 @@ function build_S_C(h, u, v, f)
 end
 
 
-#Calculate RHS residiual by central-upwind scheme
-function residual!(dq, q, params)
+# Calculate RHS residual by central-upwind scheme
+function residual!(st::State, p::Params)
+    q  = st.q
+    dq = st.dq
     _, Nx, Ny = size(q)
     h  = @view q[1, :, :]
     hu = @view q[2, :, :]
@@ -443,66 +438,86 @@ function residual!(dq, q, params)
     dhv = @view dq[3, :, :]
 
     # 1) velocities
-    u, v = build_velocities(params.x, params.y, h, hu, hv, params.Hmin)
+    u, v = build_velocities(p.x, p.y, h, hu, hv, p.Hmin)
 
     # 2) UVKL
-    Uface, Vface, Uc, Vc, K, L = build_UV_KL(u, v, params.f, params.Bc, h, params.dx, params.dy, params.g)
+    Uface, Vface, Uc, Vc, K, L =
+    build_UV_KL(h, u, v, st.f, st.Bc,
+                p.dx, p.dy, p.g)
 
     # 3) reconstruct p = (u,v,K,L)
     uE,uW,uN,uS,
     vE,vW,vN,vS,
     KE,KW,KN,KS,
-    LE,LW,LN,LS = reconstruct_p(u, v, K, L; limiter=params.limiter)
+    LE,LW,LN,LS = reconstruct_p(u, v, K, L; limiter=p.limiter)
 
     # 4) reconstruct h
-    hE,hW,hN,hS = reconstruct_h(h, Uface, Vface, KE, KW, LN, LS, params.Bfx, params.Bfy, params.g)
+    hE,hW,hN,hS = reconstruct_h(h, Uface, Vface, KE, KW, LN, LS, st.Bfx, st.Bfy, p.g)
 
     # 5) Fluxes and sources
-    F = build_F(hE, hW, uE, uW, vE, vW, params.g)   # (3,Nx+1,Ny)
-    G = build_G(hN, hS, uN, uS, vN, vS, params.g)   # (3,Nx,Ny+1)
-    SB = build_S_B(h, params.Bfx, params.Bfy, params.g, params.dx, params.dy) # (3,Nx,Ny)
-    SC = build_S_C(h, u, v, params.f)              # (3,Nx,Ny)
+    st.F .= build_F(hE, hW, uE, uW, vE, vW, p.g)        # (3,Nx+1,Ny)
+    st.G .= build_G(hN, hS, uN, uS, vN, vS, p.g)        # (3,Nx,Ny+1)
+    st.SB .= build_S_B(h, st.Bfx, st.Bfy, p.g, p.dx, p.dy)       # (3,Nx,Ny)
+    st.SC .= build_S_C(h, u, v, st.f)                        # (3,Nx,Ny)
+    F  = st.F; G  = st.G; SB = st.SB; SC = st.SC
 
-    # 7) Compute residuals
+    # 6) Compute residuals
     @inbounds for i in 1:Nx, j in 1:Ny
-        dF1 = (F[1,i+1,j] - F[1,i,j]) / params.dx
-        dF2 = (F[2,i+1,j] - F[2,i,j]) / params.dx
-        dF3 = (F[3,i+1,j] - F[3,i,j]) / params.dx
+        dF1 = (F[1,i+1,j] - F[1,i,j]) / p.dx
+        dF2 = (F[2,i+1,j] - F[2,i,j]) / p.dx
+        dF3 = (F[3,i+1,j] - F[3,i,j]) / p.dx
 
-        dG1 = (G[1,i,j+1] - G[1,i,j]) / params.dy
-        dG2 = (G[2,i,j+1] - G[2,i,j]) / params.dy
-        dG3 = (G[3,i,j+1] - G[3,i,j]) / params.dy
+        dG1 = (G[1,i,j+1] - G[1,i,j]) / p.dy
+        dG2 = (G[2,i,j+1] - G[2,i,j]) / p.dy
+        dG3 = (G[3,i,j+1] - G[3,i,j]) / p.dy
 
         dh[i,j]  = -dF1 - dG1 + SB[1,i,j] + SC[1,i,j]
         dhu[i,j] = -dF2 - dG2 + SB[2,i,j] + SC[2,i,j]
         dhv[i,j] = -dF3 - dG3 + SB[3,i,j] + SC[3,i,j]
     end
-
     return nothing
 end
+
 
 # =========================
 # Time integration: SSP-RK2 (Heun)
 # =========================
-# q is a 3D array: q[1,:,:]=h, q[2,:,:]=hu, q[3,:,:]=hv
-# params.dt is the time step
-function step_RK2!(q, params)
-    dq  = similar(q)
-    q1  = similar(q)
-    residual!(dq, q, params)        
-    @. q1 = q + params.dt * dq      
-    residual!(dq, q1, params)       
-    @. q = 0.5 * (q + q1 + params.dt * dq)
+function step_RK2!(st::State, p::Params)
+    q   = st.q
+    dq  = st.dq
+    q1  = st.q_stage
+
+    # Stage 1: q¹ = qⁿ + dt * R(qⁿ)
+    residual!(st, p)          # fills st.dq based on current st.q
+    @. q1 = q + p.dt * dq     # q1 = q + dt*dq
+
+    # Temporarily swap q → q1 to compute R(q¹)
+    q_orig = st.q
+    st.q = q1
+    residual!(st, p)          # now dq = R(q1)
+    st.q = q_orig             # restore
+
+    # Stage 2: qⁿ⁺¹ = ½ ( qⁿ + q¹ + dt * R(q¹) )
+    @. q = 0.5 * (q + q1 + p.dt * dq)
+
+    # Sync scalar fields from q
+    @views begin
+        st.h  .= q[1, :, :]
+        st.hu .= q[2, :, :]
+        st.hv .= q[3, :, :]
+    end
 
     return nothing
 end
 
+# Added function to initialize state and parameters (constructs bathymetry and coriolis)
 function init_state(x, y, bfun, f_hat, beta;
                     g, dt, Hmin, limiter=:minmod, bc=:reflective)
 
     nx, ny = length(x), length(y)
+    dx, dy = x[2]-x[1], y[2]-y[1]
     # Must build the bathymetry first
-    Bc, Bfx, Bfy, Bcorner, dx, dy = build_Btilde(x, y, bfun)
+    Bc, Bfx, Bfy, Bcorner = build_Btilde(x, y, bfun)
     # Build coriolis parameter
     f = build_f(x, y, f_hat, beta)  
 
@@ -510,6 +525,12 @@ function init_state(x, y, bfun, f_hat, beta;
     h  = zeros(nx, ny)
     hu = zeros(nx, ny)
     hv = zeros(nx, ny)
+    q = zeros(3, nx, ny)
+    @views begin 
+        q[1, :, :] .= h
+        q[2, :, :] .= hu
+        q[3, :, :] .= hv
+    end
 
     # Work arrays
     F  = zeros(3, nx+1, ny)
@@ -519,9 +540,8 @@ function init_state(x, y, bfun, f_hat, beta;
     dq = zeros(3, nx, ny)
     q_stage = similar(dq)
 
-    p  = Params(nx, ny, dx, dy, g, dt, Hmin, limiter, bc)
-    st = State(h, hu, hv, Bc, Bfx, Bfy, Bcorner, f,
-               F, G, SB, SC, dq, q_stage)
+    p  = Params(x, y, nx, ny, dx, dy, g, dt, Hmin, limiter, bc)
+    st = State(h, hu, hv, q, Bc, Bfx, Bfy, Bcorner, f, F, G, SB, SC, dq, q_stage)
     return st, p
 end
 
