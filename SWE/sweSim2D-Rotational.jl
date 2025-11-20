@@ -112,6 +112,7 @@ function build_velocities(x, y, h, qx, qy, Hmin)
         else
             u[j,k] = qx[j,k] / (h[j,k])
             v[j,k] = qy[j,k] / (h[j,k])
+        end
     end
     return u, v
 end
@@ -500,19 +501,17 @@ function init_state(x, y, bfun, f_hat, beta;
                     g, dt, Hmin, limiter=:minmod, bc=:reflective)
 
     nx, ny = length(x), length(y)
-
-    # bathymetry
+    # Must build the bathymetry first
     Bc, Bfx, Bfy, Bcorner, dx, dy = build_Btilde(x, y, bfun)
+    # Build coriolis parameter
+    f = build_f(x, y, f_hat, beta)  
 
-    # Coriolis
-    f = build_f(x, y, f_hat, beta)   # size (nx,ny)
-
-    # conservative vars
+    # Conservative vars
     h  = zeros(nx, ny)
     hu = zeros(nx, ny)
     hv = zeros(nx, ny)
 
-    # work arrays
+    # Work arrays
     F  = zeros(3, nx+1, ny)
     G  = zeros(3, nx, ny+1)
     SB = zeros(3, nx, ny)
@@ -523,7 +522,6 @@ function init_state(x, y, bfun, f_hat, beta;
     p  = Params(nx, ny, dx, dy, g, dt, Hmin, limiter, bc)
     st = State(h, hu, hv, Bc, Bfx, Bfy, Bcorner, f,
                F, G, SB, SC, dq, q_stage)
-
     return st, p
 end
 
