@@ -194,8 +194,158 @@ function slopes_p2D!(
     return nothing
 end
 
+#================================#
+# Ghost cell handling
+#================================#
+function fill_ghosts_uvKL!(ug, vg, Kg, Lg; bc::Symbol)
+    Nx2, Ny2 = size(ug)      # = (Nx+2, Ny+2)
+    Nx = Nx2 - 2
+    Ny = Ny2 - 2
+    if bc === :reflective
+        @inbounds begin
+            # left/right boundaries: u normal, v tangential
+            ug[1,  :] .= -ug[2,    :]
+            ug[end,:] .= -ug[end-1,:]
+            vg[1,  :] .=  vg[2,    :]
+            vg[end,:] .=  vg[end-1,:]
+            Kg[1,  :] .=  Kg[2,    :]
+            Kg[end,:] .=  Kg[end-1,:]
+            Lg[1,  :] .=  Lg[2,    :]
+            Lg[end,:] .=  Lg[end-1,:]
+
+            # bottom/top boundaries: v normal, u tangential
+            ug[:, 1]   .=  ug[:, 2   ]
+            ug[:, end] .=  ug[:, end-1]
+            vg[:, 1]   .= -vg[:, 2   ]
+            vg[:, end] .= -vg[:, end-1]
+            Kg[:, 1]   .=  Kg[:, 2   ]
+            Kg[:, end] .=  Kg[:, end-1]
+            Lg[:, 1]   .=  Lg[:, 2   ]
+            Lg[:, end] .=  Lg[:, end-1]
+        end
+    elseif bc === :periodic
+        @inbounds begin
+            # left/right periodic
+            ug[1,  :] .= ug[Nx+1, :]
+            ug[end,:] .= ug[2,    :]
+            vg[1,  :] .= vg[Nx+1, :]
+            vg[end,:] .= vg[2,    :]
+            Kg[1,  :] .= Kg[Nx+1, :]
+            Kg[end,:] .= Kg[2,    :]
+            Lg[1,  :] .= Lg[Nx+1, :]
+            Lg[end,:] .= Lg[2,    :]
+
+            # bottom/top periodic
+            ug[:, 1]   .= ug[:, Ny+1]
+            ug[:, end] .= ug[:, 2   ]
+            vg[:, 1]   .= vg[:, Ny+1]
+            vg[:, end] .= vg[:, 2   ]
+            Kg[:, 1]   .= Kg[:, Ny+1]
+            Kg[:, end] .= Kg[:, 2   ]
+            Lg[:, 1]   .= Lg[:, Ny+1]
+            Lg[:, end] .= Lg[:, 2   ]
+        end
+
+    elseif bc === :outflow
+        # Simple zero-gradient (Neumann) outflow BC
+        @inbounds begin
+            # left/right: copy interior values
+            ug[1,  :] .= ug[2,    :]
+            ug[end,:] .= ug[end-1,:]
+            vg[1,  :] .= vg[2,    :]
+            vg[end,:] .= vg[end-1,:]
+            Kg[1,  :] .= Kg[2,    :]
+            Kg[end,:] .= Kg[end-1,:]
+            Lg[1,  :] .= Lg[2,    :]
+            Lg[end,:] .= Lg[end-1,:]
+
+            # bottom/top: copy interior values
+            ug[:, 1]   .= ug[:, 2   ]
+            ug[:, end] .= ug[:, end-1]
+            vg[:, 1]   .= vg[:, 2   ]
+            vg[:, end] .= vg[:, end-1]
+            Kg[:, 1]   .= Kg[:, 2   ]
+            Kg[:, end] .= Kg[:, end-1]
+            Lg[:, 1]   .= Lg[:, 2   ]
+            Lg[:, end] .= Lg[:, end-1]
+        end
+
+    else
+        error("Unknown bc = $bc. Use :reflective, :periodic or :outflow.")
+    end
+    return nothing
+end
+
+function fill_ghosts_conservative!(hg, hug, hvg; bc)
+    Nx2, Ny2 = size(hg)
+    Nx = Nx2 - 2
+    Ny = Ny2 - 2
+
+    if bc === :reflective
+        @inbounds begin
+            # left/right
+            hg[1,:] .= hg[2,:]
+            hg[end,:] .= hg[end-1,:]
+            hug[1,:] .= -hug[2,:]
+            hug[end,:] .= -hug[end-1,:]
+            hvg[1,:] .=  hvg[2,:]
+            hvg[end,:] .= hvg[end-1,:]
+
+            # bottom/top
+            hg[:,1] .= hg[:,2]
+            hg[:,end] .= hg[:,end-1]
+            hug[:,1] .=  hug[:,2]
+            hug[:,end] .= hug[:,end-1]
+            hvg[:,1] .= -hvg[:,2]
+            hvg[:,end] .= -hvg[:,end-1]
+        end
+
+    elseif bc === :periodic
+        @inbounds begin
+            # left/right
+            hg[1,:] .= hg[Nx+1,:]
+            hg[end,:] .= hg[2,:]
+            hug[1,:] .= hug[Nx+1,:]
+            hug[end,:] .= hug[2,:]
+            hvg[1,:] .= hvg[Nx+1,:]
+            hvg[end,:] .= hvg[2,:]
+
+            # bottom/top
+            hg[:,1] .= hg[:,Ny+1]
+            hg[:,end] .= hg[:,2]
+            hug[:,1] .= hug[:,Ny+1]
+            hug[:,end] .= hug[:,2]
+            hvg[:,1] .= hvg[:,Ny+1]
+            hvg[:,end] .= hvg[:,2]
+        end
+
+    elseif bc === :outflow
+        @inbounds begin
+            # left/right
+            hg[1,:] .= hg[2,:]
+            hg[end,:] .= hg[end-1,:]
+            hug[1,:] .= hug[2,:]
+            hug[end,:] .= hug[end-1,:]
+            hvg[1,:] .= hvg[2,:]
+            hvg[end,:] .= hvg[end-1,:]
+
+            # bottom/top
+            hg[:,1] .= hg[:,2]
+            hg[:,end] .= hg[:,end-1]
+            hug[:,1] .= hug[:,2]
+            hug[:,end] .= hug[:,end-1]
+            hvg[:,1] .= hvg[:,2]
+            hvg[:,end] .= hvg[:,end-1]
+        end
+    else
+        error("Unknown bc = $bc")
+    end
+    return nothing
+end
+
+
 # Reconstruct using piecewise-linear reconstruction with slope limiting
-function reconstruct_p(u, v, K, L; limiter::Symbol = :minmod)
+function reconstruct_p(u, v, K, L; limiter::Symbol = :minmod, bc::Symbol = :reflective)
     Nx, Ny = size(u)
     @assert size(v) == (Nx,Ny)
     @assert size(K) == (Nx,Ny)
@@ -212,29 +362,8 @@ function reconstruct_p(u, v, K, L; limiter::Symbol = :minmod)
         Kg[2:Nx+1, 2:Ny+1] .= K
         Lg[2:Nx+1, 2:Ny+1] .= L
     end
-
-    # Set reflective BCs
-    @inbounds begin
-        # left/right boundaries
-        ug[1,  :] .= -ug[2,  :]     
-        ug[end,:] .= -ug[end-1, :] 
-        vg[1,  :] .=  vg[2,  :]      
-        vg[end,:] .=  vg[end-1, :]
-        Kg[1,  :] .=  Kg[2,  :]    
-        Kg[end,:] .=  Kg[end-1, :]
-        Lg[1,  :] .=  Lg[2,  :]
-        Lg[end,:] .=  Lg[end-1, :]
-
-        # bottom/top boundaries
-        ug[:, 1]  .=  ug[:, 2]     
-        ug[:, end].=  ug[:, end-1]
-        vg[:, 1]  .= -vg[:, 2]      
-        vg[:, end].= -vg[:, end-1]
-        Kg[:, 1]  .=  Kg[:, 2]
-        Kg[:, end].=  Kg[:, end-1]
-        Lg[:, 1]  .=  Lg[:, 2]
-        Lg[:, end].=  Lg[:, end-1]
-    end
+    # Fill ghosts according to boundary condition
+    fill_ghosts_uvKL!(ug, vg, Kg, Lg; bc = bc)
 
     # Allocate slope arrays
     σx_u = zeros(Float64, Nx+2, Ny+2); σx_v = zeros(Float64, Nx+2, Ny+2); σx_K = zeros(Float64, Nx+2, Ny+2); σx_L = zeros(Float64, Nx+2, Ny+2)
@@ -433,6 +562,17 @@ function residual!(st::State, p::Params)
     h  = @view q[1, :, :]
     hu = @view q[2, :, :]
     hv = @view q[3, :, :]
+    # Build ghosted versions of conservative variables
+    hg  = zeros(Nx+2, Ny+2); hg[2:end-1, 2:end-1] .= h
+    hug = zeros(Nx+2, Ny+2); hug[2:end-1, 2:end-1] .= hu
+    hvg = zeros(Nx+2, Ny+2); hvg[2:end-1, 2:end-1] .= hv
+
+    fill_ghosts_conservative!(hg, hug, hvg; bc = p.bc)
+
+    # redefine working copies as ghosted centers
+    h  = @view hg[2:end-1, 2:end-1]
+    hu = @view hug[2:end-1, 2:end-1]
+    hv = @view hvg[2:end-1, 2:end-1]
     dh  = @view dq[1, :, :]
     dhu = @view dq[2, :, :]
     dhv = @view dq[3, :, :]
@@ -449,7 +589,7 @@ function residual!(st::State, p::Params)
     uE,uW,uN,uS,
     vE,vW,vN,vS,
     KE,KW,KN,KS,
-    LE,LW,LN,LS = reconstruct_p(u, v, K, L; limiter=p.limiter)
+    LE,LW,LN,LS = reconstruct_p(u, v, K, L; limiter=p.limiter, bc = p.bc)
 
     # 4) reconstruct h
     hE,hW,hN,hS = reconstruct_h(h, Uface, Vface, KE, KW, LN, LS, st.Bfx, st.Bfy, p.g)
