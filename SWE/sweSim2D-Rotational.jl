@@ -104,7 +104,7 @@ function build_velocities(x, y, h, hu, hv, Hmin)
     v = zeros(nx, ny)
     dx = x[2] - x[1]
     dy = y[2] - y[1]
-    eps = dx^4
+    eps = max(dx^4, dy^4)
     @inbounds for i in 1:nx, j in 1:ny
         hij = h[i,j]
         if hij < Hmin
@@ -192,24 +192,26 @@ function fill_ghosts_uvKL!(ug, vg, Kg, Lg; bc::Symbol)
     elseif bc === :periodic
         @inbounds begin
             # left/right periodic
-            ug[1,  :] .= ug[Nx+1, :]
-            ug[end,:] .= ug[2,    :]
-            vg[1,  :] .= vg[Nx+1, :]
-            vg[end,:] .= vg[2,    :]
-            Kg[1,  :] .= Kg[Nx+1, :]
-            Kg[end,:] .= Kg[2,    :]
-            Lg[1,  :] .= Lg[Nx+1, :]
-            Lg[end,:] .= Lg[2,    :]
+            ug[1,    :] .= ug[Nx+1, :]   # Left ghost = last physical
+            ug[Nx+2, :] .= ug[2,    :]   # Right ghost = first physical
+            vg[1,    :] .= vg[Nx+1, :]
+            vg[Nx+2, :] .= vg[2,    :]
+            Kg[1,    :] .= Kg[Nx+1, :]
+            Kg[Nx+2, :] .= Kg[2,    :]
+            Lg[1,    :] .= Lg[Nx+1, :]
+            Lg[Nx+2, :] .= Lg[2,    :]
 
-            # bottom/top periodic
-            ug[:, 1]   .= ug[:, Ny+1]
-            ug[:, end] .= ug[:, 2   ]
-            vg[:, 1]   .= vg[:, Ny+1]
-            vg[:, end] .= vg[:, 2   ]
-            Kg[:, 1]   .= Kg[:, Ny+1]
-            Kg[:, end] .= Kg[:, 2   ]
-            Lg[:, 1]   .= Lg[:, Ny+1]
-            Lg[:, end] .= Lg[:, 2   ]
+            # CORRECTED: bottom/top periodic
+            # Bottom ghost (index 1) = top interior (index Ny+1)
+            # Top ghost (index Ny+2) = bottom interior (index 2)
+            ug[:, 1]    .= ug[:, Ny+1]   # Bottom ghost = last physical
+            ug[:, Ny+2] .= ug[:, 2]      # Top ghost = first physical
+            vg[:, 1]    .= vg[:, Ny+1]
+            vg[:, Ny+2] .= vg[:, 2]
+            Kg[:, 1]    .= Kg[:, Ny+1]
+            Kg[:, Ny+2] .= Kg[:, 2]
+            Lg[:, 1]    .= Lg[:, Ny+1]
+            Lg[:, Ny+2] .= Lg[:, 2]
         end
 
     elseif bc === :outflow
@@ -376,20 +378,15 @@ function build_F(hE, hW, uE, uW, vE, vW, g, bc::Symbol)
         # face between cells i and i+1 → index fi = i+1
         hL = hE[i,j]; uL = uE[i,j]; vL = vE[i,j]
         hR = hW[i+1,j]; uR = uW[i+1,j]; vR = vW[i+1,j]
-        cL = sqrt(g*max(hL,0.0))
-        cR = sqrt(g*max(hR,0.0))
-        ap = max(0.0, uL + cL, uR + cR)
-        am = min(0.0, uL - cL, uR - cR)
+        cL = sqrt(g*max(hL,0.0)); cR = sqrt(g*max(hR,0.0))
+        ap = max(0.0, uL + cL, uR + cR); am = min(0.0, uL - cL, uR - cR)
         denom = ap - am
         fi = i + 1
         if denom <= 1e-14
-            F[1,fi,j] = 0.0
-            F[2,fi,j] = 0.0
-            F[3,fi,j] = 0.0
+            F[1,fi,j] = 0.0; F[2,fi,j] = 0.0; F[3,fi,j] = 0.0
             continue
         end
-        qL = hL*uL
-        qR = hR*uR
+        qL = hL*uL; qR = hR*uR
         F[1,fi,j] = (ap*qL - am*qR)/denom + (ap*am/denom)*(hR - hL)
         FL2 = hL*uL*uL + 0.5*g*hL*hL
         FR2 = hR*uR*uR + 0.5*g*hR*hR
@@ -404,21 +401,15 @@ function build_F(hE, hW, uE, uW, vE, vW, g, bc::Symbol)
     # ---------- boundary faces: depend on bc ----------
     if bc === :reflective
         @inbounds for j in 1:Ny
-            # LEFT boundary: ghost cell (i=0) mirrored from cell 1
-            # normal is x → flip u, keep v
             hR = hW[1,j]; uR = uW[1,j]; vR = vW[1,j]
             hL = hR;      uL = -uR;     vL =  vR
 
-            cL = sqrt(g*max(hL,0.0))
-            cR = sqrt(g*max(hR,0.0))
-            ap = max(0.0, uL + cL, uR + cR)
-            am = min(0.0, uL - cL, uR - cR)
+            cL = sqrt(g*max(hL,0.0)); cR = sqrt(g*max(hR,0.0))
+            ap = max(0.0, uL + cL, uR + cR); am = min(0.0, uL - cL, uR - cR)
             denom = ap - am
 
             if denom <= 1e-14
-                F[1,1,j] = 0.0
-                F[2,1,j] = 0.0
-                F[3,1,j] = 0.0
+                F[1,1,j] = 0.0; F[2,1,j] = 0.0; F[3,1,j] = 0.0
             else
                 qL = hL*uL
                 qR = hR*uR
@@ -441,9 +432,7 @@ function build_F(hE, hW, uE, uW, vE, vW, g, bc::Symbol)
             am = min(0.0, uL - cL, uR - cR)
             denom = ap - am
             if denom <= 1e-14
-                F[1,Nx+1,j] = 0.0
-                F[2,Nx+1,j] = 0.0
-                F[3,Nx+1,j] = 0.0
+                F[1,Nx+1,j] = 0.0; F[2,Nx+1,j] = 0.0; F[3,Nx+1,j] = 0.0
             else
                 qL = hL*uL
                 qR = hR*uR
@@ -552,8 +541,6 @@ function build_G(hN, hS, uN, uS, vN, vS, g, bc::Symbol)
     # ---------- boundary faces ----------
      if bc === :reflective
         @inbounds for i in 1:Nx
-            # BOTTOM boundary: ghost below (j=0) mirrors cell j=1
-            # normal is y → flip v, keep u
             hU = hS[i,1]; uU = uS[i,1]; vU = vS[i,1]
             hD = hU;      uD = uU;      vD = -vU
             cD = sqrt(g*max(hD,0.0))
