@@ -1,9 +1,11 @@
 include("advectionSim.jl")
 using .AdvectionSim
-using Plots; default();
+using Plots; 
+default(ms = 5, lw = 2, size = (1200, 900))
+
 
 # Parameters
-N  = 150
+N  = 200
 L  = 1.0
 T  = 1.0
 a  = 1
@@ -22,11 +24,16 @@ res = AdvectionSim.advection_compare_limiters_separate(
     CFL = CFL,
     ic = ic,
     limiters = [:minmod, :mc, :superbee, :vanleer],
-    saveprefix = "plots_advection/advection"   # <-- save here
+    saveprefix = "plots_advection/advection"
 )
+ref     = res[:mc]
+x_ref   = ref.x
+u_exact = ref.u_exact
+u_num   = ref.u
 
-# Access results
-x_ref   = res.x
-u_exact = res.u_exact
-num     = res.num   # Dict: num[:mc], num[:minmod], ...
+# Collect numeric solutions from all limiters:
+num = Dict(lim => res[lim].u for lim in keys(res))
+
+nothing      
+
 
