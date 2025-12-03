@@ -4,7 +4,7 @@ import .RotSW_CDKLM
 using Plots; theme(:default)
 
 limiter = :minmod
-steps   = 100
+steps   = 1000
 nx, ny  = 100, 100
 dx, dy  = 1000, 1000
 g       = 9.81
@@ -14,7 +14,7 @@ Hmin    = 1e-3
 
 # --- Coriolis: β–plane -------------------------------------
 f0   = 1e-4         # base Coriolis parameter (s⁻¹)
-beta = 0      
+beta = 1e-8     
 
 x = collect(range(0, step=dx, length=nx))
 y = collect(range(0, step=dy, length=ny))
@@ -26,7 +26,7 @@ y0 = y[end]/2
 Lx = x[end]/6
 Ly = y[end]/6
 
-bfun(x,y) = 0 * exp(-((x - x0)^2 / Lx^2 + (y - y0)^2 / Ly^2))   # 
+bfun(x,y) = 2 * exp(-((x - x0)^2 / Lx^2 + (y - y0)^2 / Ly^2))   # 
 
 st, p = RotSW_CDKLM.init_state(x, y, bfun, f0, beta; g=g, dt=dt, Hmin=Hmin, limiter=limiter, bc=bc)
 
@@ -38,8 +38,8 @@ w0 = 10.0                      # equilibrium free surface level (m)
 st.h .= w0 .- st.Bc
 
 # choose initial velocities (u in x, v in y)
-u0 = 0.0    # m/s, 
-v0 = 0.1    # m/s, 
+u0 = 0.1    # m/s, 
+v0 = 0.0    # m/s, 
 
 # momentum = h * velocity
 st.hu .= st.h .* u0    # x-momentum h*u
