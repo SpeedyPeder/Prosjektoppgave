@@ -1,122 +1,153 @@
 module test_CDKLM
 
-export Params, State, step_RK2!, init_state
+export Params, State, init_state, residual!, step_RK2!
 
 # =========================
 # Parameters & State
 # =========================
+
 struct Params
-    x::Vector{Float64}  # x-grid points
-    y::Vector{Float64}  # y-grid points
-    nx::Int          # number of physical cells in x
-    ny::Int          # number of physical cells in y
-    dx::Float64      # grid spacing in x
-    dy::Float64      # grid spacing in y
-    g::Float64       # gravity
-    dt::Float64      # time step
-    Hmin::Float64    # desingularisation depth
-    limiter::Symbol  # :minmod, :vanalbada, ...
-    bc::Symbol       # :reflective, :periodic (This is not yet implemented)
+    x::Vector{Float64}  # x-grid points (cell centers)
+    y::Vector{Float64}  # y-grid points (cell centers)
+    nx::Int             # number of physical cells in x
+    ny::Int             # number of physical cells in y
+    dx::Float64         # grid spacing in x
+    dy::Float64         # grid spacing in y
+    g::Float64          # gravity
+    dt::Float64         # time step
+    Hmin::Float64       # desingularisation depth
+    limiter::Symbol     # :minmod, :vanalbada, ...
+    bc::Symbol          # :reflective, :periodic, :outflow
 end
 
 mutable struct State
-    # --- conservative vars ---
-    h::Array{Float64,2}   # depth h(i,j)
-    hu::Array{Float64,2}  # x-momentum h*u
-    hv::Array{Float64,2}  # y-momentum h*v
-    q::Array{Float64,3}   # combined state array (3, nx, ny)
+    # --- conservative vars (cell centred, no ghosts) ---
+    h::Array{Float64,2}    # depth h(i,j)
+    hu::Array{Float64,2}   # x-momentum h*u
+    hv::Array{Float64,2}   # y-momentum h*v
+    q::Array{Float64,3}    # combined state array (3, nx, ny)
 
-    # --- bathymetry ---
-    Bc::Array{Float64,2}        # bottom at cell centres    (nx,   ny)
-    Bfx::Array{Float64,2}       # bottom at x-faces         (nx+1, ny)
-    Bfy::Array{Float64,2}       # bottom at y-faces         (nx,   ny+1)
-    Bcorner::Array{Float64,2}   # bottom at cell corners    (nx+1, ny+1)
+    # --- bathymetry on staggered locations ---
+    Bc::Array{Float64,2}       # bottom at cell centres    (nx,   ny)
+    Bfx::Array{Float64,2}      # bottom at x-faces         (nx+1, ny)
+    Bfy::Array{Float64,2}      # bottom at y-faces         (nx,   ny+1)
+    Bcorner::Array{Float64,2}  # bottom at cell corners    (nx+1, ny+1)
 
-    # --- Coriolis ---
-    f::Array{Float64,2}         # f(i,j) at cell centres    (nx,   ny)
+    # --- Coriolis parameter at cell centres ---
+    f::Array{Float64,2}        # f(i,j) at cell centres    (nx,   ny)
 
-    # --- work arrays (reuse every RHS/step to avoid allocations) ---
-    F::Array{Float64,3}   # x-fluxes  F[c,i,j], size (3, nx+1, ny)
-    G::Array{Float64,3}   # y-fluxes  G[c,i,j], size (3, nx,   ny+1)
+    # --- work arrays (reused every RHS eval) ---
+    F::Array{Float64,3}    # x-fluxes  F[c,i,j], size (3, nx+1, ny)
+    G::Array{Float64,3}    # y-fluxes  G[c,i,j], size (3, nx,   ny+1)
 
-    SB::Array{Float64,3}  # bathymetry source terms  (3, nx, ny)
-    SC::Array{Float64,3}  # Coriolis source terms    (3, nx, ny)
+    SB::Array{Float64,3}   # bathymetry source terms  (3, nx, ny)
+    SC::Array{Float64,3}   # Coriolis source terms    (3, nx, ny)
 
-    dq::Array{Float64,3}      # RHS q_t = (h_t, (hu)_t, (hv)_t)
-    q_stage::Array{Float64,3} # temporary stage for RK2 (same layout)
+    dq::Array{Float64,3}       # RHS q_t = (h_t, (hu)_t, (hv)_t)
+    q_stage::Array{Float64,3}  # temporary stage for RK2 (same layout)
 end
+
+# θ in (2.9); can be tuned in [1,2]
+const THETA_MINMOD = 1.5
 
 # =========================
 # Limiters
 # =========================
-@inline function _minmod(a,b)
+
+@inline function _minmod2(a, b)
     (a*b <= 0.0) && return 0.0
-    return copysign(min(abs(a),abs(b)), a)
+    return copysign(min(abs(a), abs(b)), a)
 end
 
-@inline function _vanalbada(a,b; eps=1e-12)
+@inline function _minmod3(a, b, c)
+    if (a > 0.0 && b > 0.0 && c > 0.0)
+        return min(a, min(b, c))
+    elseif (a < 0.0 && b < 0.0 && c < 0.0)
+        return max(a, max(b, c))
+    else
+        return 0.0
+    end
+end
+
+@inline function _vanalbada(a, b; eps=1e-12)
     num = (a^2 + eps)*b + (b^2 + eps)*a
     den = a^2 + b^2 + 2eps
-    return den == 0 ? 0.0 : num/den
+    return den == 0.0 ? 0.0 : num/den
 end
 
-@inline function slope_limited(vL, vC, vR, limiter::Symbol)
-    dl = vC - vL
-    dr = vR - vC
-    limiter === :minmod    && return _minmod(dl,dr)
-    limiter === :vanalbada && return _vanalbada(dl,dr)
-    error("Unknown limiter $(limiter). Use :minmod or :vanalbada.")
+# Generic 2-argument limiter used for non-minmod choices.
+# Here dl, dr are *derivatives* or approximated slopes.
+@inline function slope_limited(dl, dr, limiter::Symbol)
+    if limiter === :minmod
+        return _minmod2(dl, dr)
+    elseif limiter === :vanalbada
+        return _vanalbada(dl, dr)
+    else
+        error("Unknown limiter $(limiter). Use :minmod or :vanalbada.")
+    end
 end
 
+# =========================
+# Bathymetry: piecewise bilinear (2.1)–(2.3)
+# =========================
 
-# =========================
-# Reconstruction
-# =========================
-#Bathymetry
 function build_Btilde(x, y, bfun)
-    Nx, Ny = length(x), length(y)
-    dx = x[2]-x[1]
-    dy = y[2]-y[1]
-    #1) build bathymetry at corners
-    xC = range(x[1]-dx/2, x[end]+dx/2, length=Nx+1)
-    yC = range(y[1]-dy/2, y[end]+dy/2, length=Ny+1)
-    Bcorner = [bfun(xC[j], yC[k]) for j in 1:Nx+1, k in 1:Ny+1 ]
-    #2) build bathymetry at face midpoints
-    Bfx = Array{Float64}(undef, Nx+1, Ny)
-    for j in 1:Nx+1, k in 1:Ny
-        Bfx[j,k] = 0.5*(Bcorner[j,k+1] + Bcorner[j,k]) 
+    nx, ny = length(x), length(y)
+    dx = x[2] - x[1]
+    dy = y[2] - y[1]
+
+    # Corner grid (x_{j±1/2}, y_{k±1/2})
+    xC = range(x[1] - dx/2, x[end] + dx/2, length=nx+1)
+    yC = range(y[1] - dy/2, y[end] + dy/2, length=ny+1)
+
+    Bcorner = [bfun(xC[i], yC[j]) for i in 1:nx+1, j in 1:ny+1]
+
+    # Faces: B_{j+1/2,k}, B_{j,k+1/2}
+    Bfx = Array{Float64}(undef, nx+1, ny)
+    @inbounds for i in 1:nx+1, j in 1:ny
+        Bfx[i,j] = 0.5*(Bcorner[i, j+1] + Bcorner[i, j])
     end
-    Bfy = Array{Float64}(undef, Nx, Ny+1)
-    for j in 1:Nx, k in 1:Ny+1
-        Bfy[j,k] = 0.5*(Bcorner[j+1,k] + Bcorner[j,k]) 
+
+    Bfy = Array{Float64}(undef, nx, ny+1)
+    @inbounds for i in 1:nx, j in 1:ny+1
+        Bfy[i,j] = 0.5*(Bcorner[i+1, j] + Bcorner[i, j])
     end
-    #3) build bathymetry at cell centers
-    Bc = Array{Float64}(undef, Nx, Ny)
-    for j in 1:Nx, k in 1:Ny
-        Bc[j,k] = 0.25*(Bfx[j,k] + Bfx[j+1,k] + Bfy[j,k] + Bfy[j,k+1]) #(j,k) → (j-1/2,k-1/2)
+
+    # Cell centres: B_{j,k} via (2.1)
+    Bc = Array{Float64}(undef, nx, ny)
+    @inbounds for i in 1:nx, j in 1:ny
+        Bc[i,j] = 0.25*(Bfx[i,j] + Bfx[i+1,j] + Bfy[i,j] + Bfy[i,j+1])
     end
+
     return Bc, Bfx, Bfy, Bcorner
 end
+
+# =========================
+# Velocities with desingularisation (2.4 + [27])
+# =========================
 
 function build_velocities(x, y, h, hu, hv, Hmin)
     nx, ny = size(h)
     u = zeros(nx, ny)
     v = zeros(nx, ny)
+
     dx = x[2] - x[1]
     dy = y[2] - y[1]
     eps = max(dx^4, dy^4)
+
     @inbounds for i in 1:nx, j in 1:ny
         hij = h[i,j]
         if hij < Hmin
+            # Desingularized velocities (one of the strategies from [27])
             h4 = hij^4
             denom = h4 + max(h4, eps)
             s = sqrt(denom)
-            uij = (sqrt(2)*hij*hu[i,j]) / s
-            vij = (sqrt(2)*hij*hv[i,j]) / s
+            uij = (sqrt(2.0)*hij*hu[i,j]) / s
+            vij = (sqrt(2.0)*hij*hv[i,j]) / s
             u[i,j] = uij
             v[i,j] = vij
-            hu[i,j] = hij * uij
-            hv[i,j] = hij * vij
+            hu[i,j] = hij*uij
+            hv[i,j] = hij*vij
         else
             u[i,j] = hu[i,j] / hij
             v[i,j] = hv[i,j] / hij
@@ -125,34 +156,49 @@ function build_velocities(x, y, h, hu, hv, Hmin)
     return u, v
 end
 
+# =========================
+# Coriolis parameter f = f̂ + β y_k
+# =========================
 
-#Build Coriolis parameter f = f_hat + \beta y_k
 function build_f(x, y, f_hat, beta)
-    Nx, Ny = length(x), length(y)
-    f = Array{Float64}(undef, Nx, Ny)
-    for j in 1:Nx, k in 1:Ny
-        f[j,k] = f_hat + beta * y[k]
+    nx, ny = length(x), length(y)
+    f = Array{Float64}(undef, nx, ny)
+    @inbounds for i in 1:nx, j in 1:ny
+        f[i,j] = f_hat + beta*y[j]
     end
     return f
 end
 
-# Primitives U_y = f/g * u and V_x = f/g * v 
-function build_UV_KL(h, u, v, f, Bc, dx, dy, g)
-    Nx, Ny = size(u)
-    Uface = zeros(Float64, Nx, Ny+1)
-    @inbounds for i in 1:Nx, j in 1:Ny
-        Uface[i,j+1] = Uface[i,j] + (f[i,j]/g) * u[i,j] * dy
-    end
-    Vface = zeros(Float64, Nx+1, Ny)
-    @inbounds for j in 1:Ny, i in 1:Nx
-        Vface[i+1,j] = Vface[i,j] + (f[i,j]/g) * v[i,j] * dx
-    end
-    Uc = @. 0.5 * (Uface[:,1:end-1] + Uface[:,2:end])
-    Vc = @. 0.5 * (Vface[1:end-1,:] + Vface[2:end,:])
+# =========================
+# Coriolis primitives U, V and potentials K, L (2.5)–(2.7)
+# =========================
 
+function build_UV_KL(h, u, v, f, Bc, dx, dy, g)
+    nx, ny = size(u)
+    @assert size(v) == (nx, ny)
+    @assert size(f) == (nx, ny)
+    @assert size(Bc) == (nx, ny)
+
+    # Faces: U_{j,k+1/2}, V_{j+1/2,k}
+    Uface = zeros(Float64, nx, ny+1)   # (nx,   ny+1)
+    Vface = zeros(Float64, nx+1, ny)   # (nx+1, ny)
+
+    @inbounds for i in 1:nx, j in 1:ny
+        Uface[i, j+1] = Uface[i, j] + (f[i,j]/g)*u[i,j]*dy
+    end
+
+    @inbounds for j in 1:ny, i in 1:nx
+        Vface[i+1, j] = Vface[i, j] + (f[i,j]/g)*v[i,j]*dx
+    end
+
+    # Cell-centred U, V (2.6)
+    Uc = @. 0.5*(Uface[:, 1:end-1] + Uface[:, 2:end])
+    Vc = @. 0.5*(Vface[1:end-1, :] + Vface[2:end, :])
+
+    # Potentials K, L (2.7)
     K = similar(h)
     L = similar(h)
-    @inbounds for i in 1:Nx, j in 1:Ny
+    @inbounds for i in 1:nx, j in 1:ny
         K[i,j] = g*(h[i,j] + Bc[i,j] - Vc[i,j])
         L[i,j] = g*(h[i,j] + Bc[i,j] + Uc[i,j])
     end
@@ -160,16 +206,18 @@ function build_UV_KL(h, u, v, f, Bc, dx, dy, g)
     return Uface, Vface, Uc, Vc, K, L
 end
 
-#================================#
-# Ghost cell handling
-#================================#
+# =========================
+# Ghost cell handling for u,v,K,L
+# =========================
+
 function fill_ghosts_uvKL!(ug, vg, Kg, Lg; bc::Symbol)
-    Nx2, Ny2 = size(ug)      # = (Nx+2, Ny+2)
-    Nx = Nx2 - 2
-    Ny = Ny2 - 2
+    nx2, ny2 = size(ug)      # = (nx+2, ny+2)
+    nx = nx2 - 2
+    ny = ny2 - 2
+
     if bc === :reflective
         @inbounds begin
-            # left/right boundaries: u normal, v tangential
+            # left/right: u normal, v tangential
             ug[1,  :] .= -ug[2,    :]
             ug[end,:] .= -ug[end-1,:]
             vg[1,  :] .=  vg[2,    :]
@@ -179,7 +227,7 @@ function fill_ghosts_uvKL!(ug, vg, Kg, Lg; bc::Symbol)
             Lg[1,  :] .=  Lg[2,    :]
             Lg[end,:] .=  Lg[end-1,:]
 
-            # bottom/top boundaries: v normal, u tangential
+            # bottom/top: v normal, u tangential
             ug[:, 1]   .=  ug[:, 2   ]
             ug[:, end] .=  ug[:, end-1]
             vg[:, 1]   .= -vg[:, 2   ]
@@ -189,35 +237,33 @@ function fill_ghosts_uvKL!(ug, vg, Kg, Lg; bc::Symbol)
             Lg[:, 1]   .=  Lg[:, 2   ]
             Lg[:, end] .=  Lg[:, end-1]
         end
+
     elseif bc === :periodic
         @inbounds begin
             # left/right periodic
-            ug[1,    :] .= ug[Nx+1, :]   # Left ghost = last physical
-            ug[Nx+2, :] .= ug[2,    :]   # Right ghost = first physical
-            vg[1,    :] .= vg[Nx+1, :]
-            vg[Nx+2, :] .= vg[2,    :]
-            Kg[1,    :] .= Kg[Nx+1, :]
-            Kg[Nx+2, :] .= Kg[2,    :]
-            Lg[1,    :] .= Lg[Nx+1, :]
-            Lg[Nx+2, :] .= Lg[2,    :]
+            ug[1,    :] .= ug[nx+1, :]
+            ug[nx+2, :] .= ug[2,    :]
+            vg[1,    :] .= vg[nx+1, :]
+            vg[nx+2, :] .= vg[2,    :]
+            Kg[1,    :] .= Kg[nx+1, :]
+            Kg[nx+2, :] .= Kg[2,    :]
+            Lg[1,    :] .= Lg[nx+1, :]
+            Lg[nx+2, :] .= Lg[2,    :]
 
-            # CORRECTED: bottom/top periodic
-            # Bottom ghost (index 1) = top interior (index Ny+1)
-            # Top ghost (index Ny+2) = bottom interior (index 2)
-            ug[:, 1]    .= ug[:, Ny+1]   # Bottom ghost = last physical
-            ug[:, Ny+2] .= ug[:, 2]      # Top ghost = first physical
-            vg[:, 1]    .= vg[:, Ny+1]
-            vg[:, Ny+2] .= vg[:, 2]
-            Kg[:, 1]    .= Kg[:, Ny+1]
-            Kg[:, Ny+2] .= Kg[:, 2]
-            Lg[:, 1]    .= Lg[:, Ny+1]
-            Lg[:, Ny+2] .= Lg[:, 2]
+            # bottom/top periodic
+            ug[:, 1]    .= ug[:, ny+1]
+            ug[:, ny+2] .= ug[:, 2]
+            vg[:, 1]    .= vg[:, ny+1]
+            vg[:, ny+2] .= vg[:, 2]
+            Kg[:, 1]    .= Kg[:, ny+1]
+            Kg[:, ny+2] .= Kg[:, 2]
+            Lg[:, 1]    .= Lg[:, ny+1]
+            Lg[:, ny+2] .= Lg[:, 2]
         end
 
     elseif bc === :outflow
-        # Simple zero-gradient (Neumann) outflow BC
+        # zero-gradient (Neumann) outflow
         @inbounds begin
-            # left/right: copy interior values
             ug[1,  :] .= ug[2,    :]
             ug[end,:] .= ug[end-1,:]
             vg[1,  :] .= vg[2,    :]
@@ -227,133 +273,132 @@ function fill_ghosts_uvKL!(ug, vg, Kg, Lg; bc::Symbol)
             Lg[1,  :] .= Lg[2,    :]
             Lg[end,:] .= Lg[end-1,:]
 
-            # bottom/top: copy interior values
-            ug[:, 1]   .= ug[:, 2   ]
-            ug[:, end] .= ug[:, end-1]
-            vg[:, 1]   .= vg[:, 2   ]
-            vg[:, end] .= vg[:, end-1]
-            Kg[:, 1]   .= Kg[:, 2   ]
-            Kg[:, end] .= Kg[:, end-1]
-            Lg[:, 1]   .= Lg[:, 2   ]
-            Lg[:, end] .= Lg[:, end-1]
+            ug[:, 1]   .=  ug[:, 2   ]
+            ug[:, end] .=  ug[:, end-1]
+            vg[:, 1]   .=  vg[:, 2   ]
+            vg[:, end] .=  vg[:, end-1]
+            Kg[:, 1]   .=  Kg[:, 2   ]
+            Kg[:, end] .=  Kg[:, end-1]
+            Lg[:, 1]   .=  Lg[:, 2   ]
+            Lg[:, end] .=  Lg[:, end-1]
         end
-
     else
         error("Unknown bc = $bc. Use :reflective, :periodic or :outflow.")
     end
     return nothing
 end
 
-#================================#
-# Ghost cells for h, hu, hv      #
-#================================#
+# =========================
+# Ghost cells for h,hu,hv
+# =========================
+
 function fill_ghosts_huv!(hg, hug, hvg; bc::Symbol)
-    Nx2, Ny2 = size(hg)          # (Nx+2, Ny+2)
-    Nx = Nx2 - 2
-    Ny = Ny2 - 2
+    nx2, ny2 = size(hg)      # (nx+2, ny+2)
+    nx = nx2 - 2
+    ny = ny2 - 2
 
     if bc === :periodic
         @inbounds begin
-            # left/right periodic
-            hg[1, 2:Ny+1]      .= hg[Nx+1, 2:Ny+1]
-            hg[Nx+2, 2:Ny+1]   .= hg[2,     2:Ny+1]
-            hug[1, 2:Ny+1]     .= hug[Nx+1, 2:Ny+1]
-            hug[Nx+2, 2:Ny+1]  .= hug[2,    2:Ny+1]
-            hvg[1, 2:Ny+1]     .= hvg[Nx+1, 2:Ny+1]
-            hvg[Nx+2, 2:Ny+1]  .= hvg[2,    2:Ny+1]
+            # left/right
+            hg[1,  2:ny+1]     .= hg[nx+1, 2:ny+1]
+            hg[nx+2, 2:ny+1]   .= hg[2,    2:ny+1]
+            hug[1,  2:ny+1]    .= hug[nx+1, 2:ny+1]
+            hug[nx+2, 2:ny+1]  .= hug[2,    2:ny+1]
+            hvg[1,  2:ny+1]    .= hvg[nx+1, 2:ny+1]
+            hvg[nx+2, 2:ny+1]  .= hvg[2,    2:ny+1]
 
-            # bottom/top periodic
-            hg[2:Nx+1, 1]      .= hg[2:Nx+1, Ny+1]
-            hg[2:Nx+1, Ny+2]   .= hg[2:Nx+1, 2]
-            hug[2:Nx+1, 1]     .= hug[2:Nx+1, Ny+1]
-            hug[2:Nx+1, Ny+2]  .= hug[2:Nx+1, 2]
-            hvg[2:Nx+1, 1]     .= hvg[2:Nx+1, Ny+1]
-            hvg[2:Nx+1, Ny+2]  .= hvg[2:Nx+1, 2]
+            # bottom/top
+            hg[2:nx+1, 1]      .= hg[2:nx+1, ny+1]
+            hg[2:nx+1, ny+2]   .= hg[2:nx+1, 2]
+            hug[2:nx+1, 1]     .= hug[2:nx+1, ny+1]
+            hug[2:nx+1, ny+2]  .= hug[2:nx+1, 2]
+            hvg[2:nx+1, 1]     .= hvg[2:nx+1, ny+1]
+            hvg[2:nx+1, ny+2]  .= hvg[2:nx+1, 2]
 
             # corners
-            hg[1, 1]           = hg[Nx+1, Ny+1]
-            hg[1, Ny+2]        = hg[Nx+1, 2]
-            hg[Nx+2, 1]        = hg[2, Ny+1]
-            hg[Nx+2, Ny+2]     = hg[2, 2]
+            hg[1, 1]        = hg[nx+1, ny+1]
+            hg[1, ny+2]     = hg[nx+1, 2]
+            hg[nx+2, 1]     = hg[2, ny+1]
+            hg[nx+2, ny+2]  = hg[2, 2]
 
-            hug[1, 1]          = hug[Nx+1, Ny+1]
-            hug[1, Ny+2]       = hug[Nx+1, 2]
-            hug[Nx+2, 1]       = hug[2, Ny+1]
-            hug[Nx+2, Ny+2]    = hug[2, 2]
+            hug[1, 1]       = hug[nx+1, ny+1]
+            hug[1, ny+2]    = hug[nx+1, 2]
+            hug[nx+2, 1]    = hug[2, ny+1]
+            hug[nx+2, ny+2] = hug[2, 2]
 
-            hvg[1, 1]          = hvg[Nx+1, Ny+1]
-            hvg[1, Ny+2]       = hvg[Nx+1, 2]
-            hvg[Nx+2, 1]       = hvg[2, Ny+1]
-            hvg[Nx+2, Ny+2]    = hvg[2, 2]
+            hvg[1, 1]       = hvg[nx+1, ny+1]
+            hvg[1, ny+2]    = hvg[nx+1, 2]
+            hvg[nx+2, 1]    = hvg[2, ny+1]
+            hvg[nx+2, ny+2] = hvg[2, 2]
         end
 
     elseif bc === :reflective
         @inbounds begin
-            # left/right: wall normal to x → flip hu, keep hv
-            hg[1, 2:Ny+1]      .= hg[2,     2:Ny+1]
-            hg[Nx+2, 2:Ny+1]   .= hg[Nx+1, 2:Ny+1]
-            hug[1, 2:Ny+1]     .= -hug[2,     2:Ny+1]
-            hug[Nx+2, 2:Ny+1]  .= -hug[Nx+1, 2:Ny+1]
-            hvg[1, 2:Ny+1]     .=  hvg[2,     2:Ny+1]
-            hvg[Nx+2, 2:Ny+1]  .=  hvg[Nx+1, 2:Ny+1]
+            # left/right: wall normal to x → flip hu
+            hg[1,  2:ny+1]     .= hg[2,     2:ny+1]
+            hg[nx+2, 2:ny+1]   .= hg[nx+1, 2:ny+1]
+            hug[1,  2:ny+1]    .= -hug[2,     2:ny+1]
+            hug[nx+2, 2:ny+1]  .= -hug[nx+1, 2:ny+1]
+            hvg[1,  2:ny+1]    .=  hvg[2,     2:ny+1]
+            hvg[nx+2, 2:ny+1]  .=  hvg[nx+1, 2:ny+1]
 
-            # bottom/top: wall normal to y → flip hv, keep hu
-            hg[2:Nx+1, 1]      .= hg[2:Nx+1, 2]
-            hg[2:Nx+1, Ny+2]   .= hg[2:Nx+1, Ny+1]
-            hug[2:Nx+1, 1]     .= hug[2:Nx+1, 2]
-            hug[2:Nx+1, Ny+2]  .= hug[2:Nx+1, Ny+1]
-            hvg[2:Nx+1, 1]     .= -hvg[2:Nx+1, 2]
-            hvg[2:Nx+1, Ny+2]  .= -hvg[2:Nx+1, Ny+1]
+            # bottom/top: wall normal to y → flip hv
+            hg[2:nx+1, 1]      .= hg[2:nx+1, 2]
+            hg[2:nx+1, ny+2]   .= hg[2:nx+1, ny+1]
+            hug[2:nx+1, 1]     .= hug[2:nx+1, 2]
+            hug[2:nx+1, ny+2]  .= hug[2:nx+1, ny+1]
+            hvg[2:nx+1, 1]     .= -hvg[2:nx+1, 2]
+            hvg[2:nx+1, ny+2]  .= -hvg[2:nx+1, ny+1]
 
-            # corners: just copy from nearest interior
-            hg[1, 1]           = hg[2, 2]
-            hg[1, Ny+2]        = hg[2, Ny+1]
-            hg[Nx+2, 1]        = hg[Nx+1, 2]
-            hg[Nx+2, Ny+2]     = hg[Nx+1, Ny+1]
+            # corners (copy nearest interior)
+            hg[1, 1]        = hg[2, 2]
+            hg[1, ny+2]     = hg[2, ny+1]
+            hg[nx+2, 1]     = hg[nx+1, 2]
+            hg[nx+2, ny+2]  = hg[nx+1, ny+1]
 
-            hug[1, 1]          = hug[2, 2]
-            hug[1, Ny+2]       = hug[2, Ny+1]
-            hug[Nx+2, 1]       = hug[Nx+1, 2]
-            hug[Nx+2, Ny+2]    = hug[Nx+1, Ny+1]
+            hug[1, 1]       = hug[2, 2]
+            hug[1, ny+2]    = hug[2, ny+1]
+            hug[nx+2, 1]    = hug[nx+1, 2]
+            hug[nx+2, ny+2] = hug[nx+1, ny+1]
 
-            hvg[1, 1]          = hvg[2, 2]
-            hvg[1, Ny+2]       = hvg[2, Ny+1]
-            hvg[Nx+2, 1]       = hvg[Nx+1, 2]
-            hvg[Nx+2, Ny+2]    = hvg[Nx+1, Ny+1]
+            hvg[1, 1]       = hvg[2, 2]
+            hvg[1, ny+2]    = hvg[2, ny+1]
+            hvg[nx+2, 1]    = hvg[nx+1, 2]
+            hvg[nx+2, ny+2] = hvg[nx+1, ny+1]
         end
 
     elseif bc === :outflow
         @inbounds begin
-            # copy nearest interior values (zero-gradient)
-            hg[1, 2:Ny+1]      .= hg[2,     2:Ny+1]
-            hg[Nx+2, 2:Ny+1]   .= hg[Nx+1, 2:Ny+1]
-            hug[1, 2:Ny+1]     .= hug[2,     2:Ny+1]
-            hug[Nx+2, 2:Ny+1]  .= hug[Nx+1, 2:Ny+1]
-            hvg[1, 2:Ny+1]     .= hvg[2,     2:Ny+1]
-            hvg[Nx+2, 2:Ny+1]  .= hvg[Nx+1, 2:Ny+1]
+            # zero-gradient everywhere
+            hg[1,  2:ny+1]     .= hg[2,     2:ny+1]
+            hg[nx+2, 2:ny+1]   .= hg[nx+1, 2:ny+1]
+            hug[1,  2:ny+1]    .= hug[2,     2:ny+1]
+            hug[nx+2, 2:ny+1]  .= hug[nx+1, 2:ny+1]
+            hvg[1,  2:ny+1]    .= hvg[2,     2:ny+1]
+            hvg[nx+2, 2:ny+1]  .= hvg[nx+1, 2:ny+1]
 
-            hg[2:Nx+1, 1]      .= hg[2:Nx+1, 2]
-            hg[2:Nx+1, Ny+2]   .= hg[2:Nx+1, Ny+1]
-            hug[2:Nx+1, 1]     .= hug[2:Nx+1, 2]
-            hug[2:Nx+1, Ny+2]  .= hug[2:Nx+1, Ny+1]
-            hvg[2:Nx+1, 1]     .= hvg[2:Nx+1, 2]
-            hvg[2:Nx+1, Ny+2]  .= hvg[2:Nx+1, Ny+1]
+            hg[2:nx+1, 1]      .= hg[2:nx+1, 2]
+            hg[2:nx+1, ny+2]   .= hg[2:nx+1, ny+1]
+            hug[2:nx+1, 1]     .= hug[2:nx+1, 2]
+            hug[2:nx+1, ny+2]  .= hug[2:nx+1, ny+1]
+            hvg[2:nx+1, 1]     .= hvg[2:nx+1, 2]
+            hvg[2:nx+1, ny+2]  .= hvg[2:nx+1, ny+1]
 
             # corners
-            hg[1, 1]           = hg[2, 2]
-            hg[1, Ny+2]        = hg[2, Ny+1]
-            hg[Nx+2, 1]        = hg[Nx+1, 2]
-            hg[Nx+2, Ny+2]     = hg[Nx+1, Ny+1]
+            hg[1, 1]        = hg[2, 2]
+            hg[1, ny+2]     = hg[2, ny+1]
+            hg[nx+2, 1]     = hg[nx+1, 2]
+            hg[nx+2, ny+2]  = hg[nx+1, ny+1]
 
-            hug[1, 1]          = hug[2, 2]
-            hug[1, Ny+2]       = hug[2, Ny+1]
-            hug[Nx+2, 1]       = hug[Nx+1, 2]
-            hug[Nx+2, Ny+2]    = hug[Nx+1, Ny+1]
+            hug[1, 1]       = hug[2, 2]
+            hug[1, ny+2]    = hug[2, ny+1]
+            hug[nx+2, 1]    = hug[nx+1, 2]
+            hug[nx+2, ny+2] = hug[nx+1, ny+1]
 
-            hvg[1, 1]          = hvg[2, 2]
-            hvg[1, Ny+2]       = hvg[2, Ny+1]
-            hvg[Nx+2, 1]       = hvg[Nx+1, 2]
-            hvg[Nx+2, Ny+2]    = hvg[Nx+1, Ny+1]
+            hvg[1, 1]       = hvg[2, 2]
+            hvg[1, ny+2]    = hvg[2, ny+1]
+            hvg[nx+2, 1]    = hvg[nx+1, 2]
+            hvg[nx+2, ny+2] = hvg[nx+1, ny+1]
         end
     else
         error("Unknown bc = $bc in fill_ghosts_huv!")
@@ -362,98 +407,186 @@ function fill_ghosts_huv!(hg, hug, hvg; bc::Symbol)
     return nothing
 end
 
+# =========================
+# 2D slopes for u, v, K, L  (generalized minmod, (2.9))
+# =========================
 
-##########################
-# 2D slopes for u,v,K,L  #
-##########################
-function slopes_p2D!(σx_u, σx_v, σx_K, σx_L,
+function slopes_p2D!(
+    σx_u, σx_v, σx_K, σx_L,
     σy_u, σy_v, σy_K, σy_L,
     ug, vg, Kg, Lg;
-    limiter::Symbol = :minmod)
-    Nx2, Ny2 = size(ug)
-    @assert size(vg) == (Nx2, Ny2)
-    @assert size(Kg) == (Nx2, Ny2)
-    @assert size(Lg) == (Nx2, Ny2)
+    limiter::Symbol = :minmod,
+    dx::Float64,
+    dy::Float64
+)
+    nx2, ny2 = size(ug)
+    @assert size(vg) == (nx2, ny2)
+    @assert size(Kg) == (nx2, ny2)
+    @assert size(Lg) == (nx2, ny2)
 
-    Nx = Nx2 - 2          # number of interior cells in x
-    Ny = Ny2 - 2          # number of interior cells in y
+    nx = nx2 - 2
+    ny = ny2 - 2
 
-    @inbounds for i in 2:Nx+1, j in 2:Ny+1
-        # x-direction slopes
-        σx_u[i,j] = slope_limited(ug[i-1,j], ug[i,j], ug[i+1,j], limiter)
-        σx_v[i,j] = slope_limited(vg[i-1,j], vg[i,j], vg[i+1,j], limiter)
-        σx_K[i,j] = slope_limited(Kg[i-1,j], Kg[i,j], Kg[i+1,j], limiter)
-        σx_L[i,j] = slope_limited(Lg[i-1,j], Lg[i,j], Lg[i+1,j], limiter)
+    if limiter === :minmod
+        θ = THETA_MINMOD
+        @inbounds for I in 2:nx+1, J in 2:ny+1
+            # ----- x-direction slopes -----
+            duR = (ug[I+1,J] - ug[I,  J]) / dx
+            du0 = (ug[I+1,J] - ug[I-1,J]) / (2dx)
+            duL = (ug[I,  J] - ug[I-1,J]) / dx
+            σx_u[I,J] = _minmod3(θ*duR, du0, θ*duL)
 
-        # y-direction slopes
-        σy_u[i,j] = slope_limited(ug[i,j-1], ug[i,j], ug[i,j+1], limiter)
-        σy_v[i,j] = slope_limited(vg[i,j-1], vg[i,j], vg[i,j+1], limiter)
-        σy_K[i,j] = slope_limited(Kg[i,j-1], Kg[i,j], Kg[i,j+1], limiter)
-        σy_L[i,j] = slope_limited(Lg[i,j-1], Lg[i,j], Lg[i,j+1], limiter)
+            dvR = (vg[I+1,J] - vg[I,  J]) / dx
+            dv0 = (vg[I+1,J] - vg[I-1,J]) / (2dx)
+            dvL = (vg[I,  J] - vg[I-1,J]) / dx
+            σx_v[I,J] = _minmod3(θ*dvR, dv0, θ*dvL)
+
+            dKR = (Kg[I+1,J] - Kg[I,  J]) / dx
+            dK0 = (Kg[I+1,J] - Kg[I-1,J]) / (2dx)
+            dKL = (Kg[I,  J] - Kg[I-1,J]) / dx
+            σx_K[I,J] = _minmod3(θ*dKR, dK0, θ*dKL)
+
+            dLR = (Lg[I+1,J] - Lg[I,  J]) / dx
+            dL0 = (Lg[I+1,J] - Lg[I-1,J]) / (2dx)
+            dLL = (Lg[I,  J] - Lg[I-1,J]) / dx
+            σx_L[I,J] = _minmod3(θ*dLR, dL0, θ*dLL)
+
+            # ----- y-direction slopes -----
+            duR = (ug[I,J+1] - ug[I,J  ]) / dy
+            du0 = (ug[I,J+1] - ug[I,J-1]) / (2dy)
+            duL = (ug[I,J  ] - ug[I,J-1]) / dy
+            σy_u[I,J] = _minmod3(θ*duR, du0, θ*duL)
+
+            dvR = (vg[I,J+1] - vg[I,J  ]) / dy
+            dv0 = (vg[I,J+1] - vg[I,J-1]) / (2dy)
+            dvL = (vg[I,J  ] - vg[I,J-1]) / dy
+            σy_v[I,J] = _minmod3(θ*dvR, dv0, θ*dvL)
+
+            dKR = (Kg[I,J+1] - Kg[I,J  ]) / dy
+            dK0 = (Kg[I,J+1] - Kg[I,J-1]) / (2dy)
+            dKL = (Kg[I,J  ] - Kg[I,J-1]) / dy
+            σy_K[I,J] = _minmod3(θ*dKR, dK0, θ*dKL)
+
+            dLR = (Lg[I,J+1] - Lg[I,J  ]) / dy
+            dL0 = (Lg[I,J+1] - Lg[I,J-1]) / (2dy)
+            dLL = (Lg[I,J  ] - Lg[I,J-1]) / dy
+            σy_L[I,J] = _minmod3(θ*dLR, dL0, θ*dLL)
+        end
+
+    else
+        # Generic two-argument limiter using left/right derivatives
+        @inbounds for I in 2:nx+1, J in 2:ny+1
+            # x-direction
+            dl = (ug[I,  J] - ug[I-1,J]) / dx
+            dr = (ug[I+1,J] - ug[I,  J]) / dx
+            σx_u[I,J] = slope_limited(dl, dr, limiter)
+
+            dl = (vg[I,  J] - vg[I-1,J]) / dx
+            dr = (vg[I+1,J] - vg[I,  J]) / dx
+            σx_v[I,J] = slope_limited(dl, dr, limiter)
+
+            dl = (Kg[I,  J] - Kg[I-1,J]) / dx
+            dr = (Kg[I+1,J] - Kg[I,  J]) / dx
+            σx_K[I,J] = slope_limited(dl, dr, limiter)
+
+            dl = (Lg[I,  J] - Lg[I-1,J]) / dx
+            dr = (Lg[I+1,J] - Lg[I,  J]) / dx
+            σx_L[I,J] = slope_limited(dl, dr, limiter)
+
+            # y-direction
+            dl = (ug[I,J  ] - ug[I,J-1]) / dy
+            dr = (ug[I,J+1] - ug[I,J  ]) / dy
+            σy_u[I,J] = slope_limited(dl, dr, limiter)
+
+            dl = (vg[I,J  ] - vg[I,J-1]) / dy
+            dr = (vg[I,J+1] - vg[I,J  ]) / dy
+            σy_v[I,J] = slope_limited(dl, dr, limiter)
+
+            dl = (Kg[I,J  ] - Kg[I,J-1]) / dy
+            dr = (Kg[I,J+1] - Kg[I,J  ]) / dy
+            σy_K[I,J] = slope_limited(dl, dr, limiter)
+
+            dl = (Lg[I,J  ] - Lg[I,J-1]) / dy
+            dr = (Lg[I,J+1] - Lg[I,J  ]) / dy
+            σy_L[I,J] = slope_limited(dl, dr, limiter)
+        end
     end
 
     return nothing
 end
 
-# Reconstruct using piecewise-linear reconstruction with slope limiting
-function reconstruct_p(u, v, K, L; limiter::Symbol = :minmod, bc::Symbol = :reflective)
-    Nx, Ny = size(u)
-    @assert size(v) == (Nx,Ny)
-    @assert size(K) == (Nx,Ny)
-    @assert size(L) == (Nx,Ny)
+# =========================
+# Reconstruction of p = (u,v,K,L) (2.8)–(2.10)
+# =========================
 
-    # Allocate ghosts and set reflective BCs
-    ug = zeros(Float64, Nx+2, Ny+2)
-    vg = zeros(Float64, Nx+2, Ny+2)
-    Kg = zeros(Float64, Nx+2, Ny+2)
-    Lg = zeros(Float64, Nx+2, Ny+2)
+function reconstruct_p(u, v, K, L, dx, dy;
+                       limiter::Symbol = :minmod,
+                       bc::Symbol = :reflective)
+
+    nx, ny = size(u)
+    @assert size(v) == (nx, ny)
+    @assert size(K) == (nx, ny)
+    @assert size(L) == (nx, ny)
+
+    # ghosted arrays
+    ug = zeros(Float64, nx+2, ny+2)
+    vg = zeros(Float64, nx+2, ny+2)
+    Kg = zeros(Float64, nx+2, ny+2)
+    Lg = zeros(Float64, nx+2, ny+2)
+
     @inbounds begin
-        ug[2:Nx+1, 2:Ny+1] .= u
-        vg[2:Nx+1, 2:Ny+1] .= v
-        Kg[2:Nx+1, 2:Ny+1] .= K
-        Lg[2:Nx+1, 2:Ny+1] .= L
+        ug[2:nx+1, 2:ny+1] .= u
+        vg[2:nx+1, 2:ny+1] .= v
+        Kg[2:nx+1, 2:ny+1] .= K
+        Lg[2:nx+1, 2:ny+1] .= L
     end
-    # Fill ghosts according to boundary condition
-    fill_ghosts_uvKL!(ug, vg, Kg, Lg; bc = bc)
 
-    # Allocate slope arrays
-    σx_u = zeros(Float64, Nx+2, Ny+2); σx_v = zeros(Float64, Nx+2, Ny+2); σx_K = zeros(Float64, Nx+2, Ny+2); σx_L = zeros(Float64, Nx+2, Ny+2)
-    σy_u = zeros(Float64, Nx+2, Ny+2); σy_v = zeros(Float64, Nx+2, Ny+2); σy_K = zeros(Float64, Nx+2, Ny+2); σy_L = zeros(Float64, Nx+2, Ny+2)
+    fill_ghosts_uvKL!(ug, vg, Kg, Lg; bc=bc)
 
-    #Compute slopes
-    slopes_p2D!(σx_u, σx_v, σx_K, σx_L, σy_u, σy_v, σy_K, σy_L, ug, vg, Kg, Lg; limiter=limiter)
+    # slope arrays
+    σx_u = zeros(Float64, nx+2, ny+2)
+    σx_v = zeros(Float64, nx+2, ny+2)
+    σx_K = zeros(Float64, nx+2, ny+2)
+    σx_L = zeros(Float64, nx+2, ny+2)
+    σy_u = zeros(Float64, nx+2, ny+2)
+    σy_v = zeros(Float64, nx+2, ny+2)
+    σy_K = zeros(Float64, nx+2, ny+2)
+    σy_L = zeros(Float64, nx+2, ny+2)
 
-    # Allocate interface arrays 
+    slopes_p2D!(σx_u, σx_v, σx_K, σx_L,
+                σy_u, σy_v, σy_K, σy_L,
+                ug, vg, Kg, Lg;
+                limiter=limiter, dx=dx, dy=dy)
+
+    # interface values: cell-centred i,j → use I=i+1, J=j+1
     uE = similar(u); uW = similar(u); uN = similar(u); uS = similar(u)
     vE = similar(v); vW = similar(v); vN = similar(v); vS = similar(v)
     KE = similar(K); KW = similar(K); KN = similar(K); KS = similar(K)
     LE = similar(L); LW = similar(L); LN = similar(L); LS = similar(L)
 
-    # Reconstruct
-    @inbounds for i in 1:Nx, j in 1:Ny
-        #Shifted indices for ghosts
+    @inbounds for i in 1:nx, j in 1:ny
         I = i + 1
         J = j + 1
 
-        # x-faces
-        uE[i,j] = ug[I,J] + 0.5*σx_u[I,J]
-        uW[i,j] = ug[I,J] - 0.5*σx_u[I,J]
-        vE[i,j] = vg[I,J] + 0.5*σx_v[I,J]
-        vW[i,j] = vg[I,J] - 0.5*σx_v[I,J]
-        KE[i,j] = Kg[I,J] + 0.5*σx_K[I,J]
-        KW[i,j] = Kg[I,J] - 0.5*σx_K[I,J]
-        LE[i,j] = Lg[I,J] + 0.5*σx_L[I,J]
-        LW[i,j] = Lg[I,J] - 0.5*σx_L[I,J]
+        # x-faces: (x_{j±1/2}, y_k)
+        uE[i,j] = ug[I,J] + 0.5*dx*σx_u[I,J]
+        uW[i,j] = ug[I,J] - 0.5*dx*σx_u[I,J]
+        vE[i,j] = vg[I,J] + 0.5*dx*σx_v[I,J]
+        vW[i,j] = vg[I,J] - 0.5*dx*σx_v[I,J]
+        KE[i,j] = Kg[I,J] + 0.5*dx*σx_K[I,J]
+        KW[i,j] = Kg[I,J] - 0.5*dx*σx_K[I,J]
+        LE[i,j] = Lg[I,J] + 0.5*dx*σx_L[I,J]
+        LW[i,j] = Lg[I,J] - 0.5*dx*σx_L[I,J]
 
-        # y-faces
-        uN[i,j] = ug[I,J] + 0.5*σy_u[I,J]
-        uS[i,j] = ug[I,J] - 0.5*σy_u[I,J]
-        vN[i,j] = vg[I,J] + 0.5*σy_v[I,J]
-        vS[i,j] = vg[I,J] - 0.5*σy_v[I,J]
-        KN[i,j] = Kg[I,J] + 0.5*σy_K[I,J]
-        KS[i,j] = Kg[I,J] - 0.5*σy_K[I,J]
-        LN[i,j] = Lg[I,J] + 0.5*σy_L[I,J]
-        LS[i,j] = Lg[I,J] - 0.5*σy_L[I,J]
+        # y-faces: (x_j, y_{k±1/2})
+        uN[i,j] = ug[I,J] + 0.5*dy*σy_u[I,J]
+        uS[i,j] = ug[I,J] - 0.5*dy*σy_u[I,J]
+        vN[i,j] = vg[I,J] + 0.5*dy*σy_v[I,J]
+        vS[i,j] = vg[I,J] - 0.5*dy*σy_v[I,J]
+        KN[i,j] = Kg[I,J] + 0.5*dy*σy_K[I,J]
+        KS[i,j] = Kg[I,J] - 0.5*dy*σy_K[I,J]
+        LN[i,j] = Lg[I,J] + 0.5*dy*σy_L[I,J]
+        LS[i,j] = Lg[I,J] - 0.5*dy*σy_L[I,J]
     end
 
     return uE,uW,uN,uS,
@@ -462,52 +595,77 @@ function reconstruct_p(u, v, K, L; limiter::Symbol = :minmod, bc::Symbol = :refl
            LE,LW,LN,LS
 end
 
-function reconstruct_h(h, Uf, Vf, KE, KW, LN, LS, Bfx, Bfy, g)
-    Nx, Ny = size(h)
-    @assert size(Uf) == (Nx, Ny+1)
-    @assert size(Vf) == (Nx+1, Ny)
-    @assert size(KE)  == (Nx, Ny)
-    @assert size(KW)  == (Nx, Ny)
-    @assert size(LN)  == (Nx, Ny)
-    @assert size(LS)  == (Nx, Ny)
-    @assert size(Bfx) == (Nx+1, Ny)
-    @assert size(Bfy) == (Nx, Ny+1)
-    #Should not need ghosts here because h are reconstructed using K and L which have already been reconstructed with ghosts
-    hE = similar(h); hW = similar(h); hN = similar(h); hS = similar(h)
-    @inbounds for j in 1:Nx, k in 1:Ny
-        hE[j,k] = KE[j,k]/g + Vf[j+1,k] - Bfx[j+1,k]
-        hW[j,k] = KW[j,k]/g + Vf[j,k]   - Bfx[j,k]
-        hN[j,k] = LN[j,k]/g - Uf[j,k+1] - Bfy[j,k+1]
-        hS[j,k] = LS[j,k]/g - Uf[j,k]   - Bfy[j,k]
+# =========================
+# Reconstruction of h at faces (2.11)–(2.14)
+# =========================
+
+function reconstruct_h(h, Uface, Vface, KE, KW, LN, LS, Bfx, Bfy, g)
+    nx, ny = size(h)
+    @assert size(Uface) == (nx, ny+1)
+    @assert size(Vface) == (nx+1, ny)
+    @assert size(KE)  == (nx, ny)
+    @assert size(KW)  == (nx, ny)
+    @assert size(LN)  == (nx, ny)
+    @assert size(LS)  == (nx, ny)
+    @assert size(Bfx) == (nx+1, ny)
+    @assert size(Bfy) == (nx,   ny+1)
+
+    hE = similar(h); hW = similar(h)
+    hN = similar(h); hS = similar(h)
+
+    @inbounds for i in 1:nx, j in 1:ny
+        # (2.14)
+        hE[i,j] = KE[i,j]/g + Vface[i+1,j] - Bfx[i+1,j]
+        hW[i,j] = KW[i,j]/g + Vface[i,  j] - Bfx[i,  j]
+        hN[i,j] = LN[i,j]/g - Uface[i,  j+1] - Bfy[i,  j+1]
+        hS[i,j] = LS[i,j]/g - Uface[i,  j  ] - Bfy[i,  j]
     end
+
     return hE,hW,hN,hS
 end
 
 # =========================
-# Fluxes (central-upwind)
+# Fluxes (central-upwind, Section 3)
 # =========================
+
 function build_F(hE, hW, uE, uW, vE, vW, g, bc::Symbol)
-    Nx, Ny = size(hE)
-    @assert size(hW) == (Nx,Ny)
-    @assert size(uE) == (Nx,Ny) == size(uW) == size(vE) == size(vW)
-    F = zeros(Float64, 3, Nx+1, Ny)
-    @inbounds for i in 1:Nx-1, j in 1:Ny
-        # face between cells i and i+1 → index fi = i+1
-        hL = hE[i,j]; uL = uE[i,j]; vL = vE[i,j]
+    nx, ny = size(hE)
+    @assert size(hW) == (nx, ny)
+    @assert size(uE) == (nx, ny) == size(uW) == size(vE) == size(vW)
+
+    F = zeros(Float64, 3, nx+1, ny)
+
+    @inbounds for i in 1:nx-1, j in 1:ny
+        # Left/right states at face i+1/2
+        hL = hE[i,  j]; uL = uE[i,  j]; vL = vE[i,  j]
         hR = hW[i+1,j]; uR = uW[i+1,j]; vR = vW[i+1,j]
-        cL = sqrt(g*max(hL,0.0)); cR = sqrt(g*max(hR,0.0))
-        ap = max(0.0, uL + cL, uR + cR); am = min(0.0, uL - cL, uR - cR)
+
+        cL = sqrt(g*max(hL, 0.0))
+        cR = sqrt(g*max(hR, 0.0))
+        ap = max(0.0, uL + cL, uR + cR)   # a^+ (3.10)
+        am = min(0.0, uL - cL, uR - cR)   # a^- (3.10)
         denom = ap - am
         fi = i + 1
+
         if denom <= 1e-14
-            F[1,fi,j] = 0.0; F[2,fi,j] = 0.0; F[3,fi,j] = 0.0
+            F[1,fi,j] = 0.0
+            F[2,fi,j] = 0.0
+            F[3,fi,j] = 0.0
             continue
         end
-        qL = hL*uL; qR = hR*uR
+
+        qL = hL*uL
+        qR = hR*uR
+
+        # F(1) (3.2)
         F[1,fi,j] = (ap*qL - am*qR)/denom + (ap*am/denom)*(hR - hL)
+
+        # F(2) (3.3)
         FL2 = hL*uL*uL + 0.5*g*hL*hL
         FR2 = hR*uR*uR + 0.5*g*hR*hR
         F[2,fi,j] = (ap*FL2 - am*FR2)/denom + (ap*am/denom)*(qR - qL)
+
+        # F(3): upwind in v (3.4)
         if (uL + uR) > 0.0
             F[3,fi,j] = qL*vL
         else
@@ -515,67 +673,59 @@ function build_F(hE, hW, uE, uW, vE, vW, g, bc::Symbol)
         end
     end
 
-    # ---------- boundary faces: depend on bc ----------
+    # Boundaries
     if bc === :reflective
-        @inbounds for j in 1:Ny
+        @inbounds for j in 1:ny
+            # LEFT boundary (ghost to the left is mirror of cell 1)
             hR = hW[1,j]; uR = uW[1,j]; vR = vW[1,j]
-            hL = hR;      uL = -uR;     vL =  vR
-
-            cL = sqrt(g*max(hL,0.0)); cR = sqrt(g*max(hR,0.0))
-            ap = max(0.0, uL + cL, uR + cR); am = min(0.0, uL - cL, uR - cR)
+            hL = hR;      uL = -uR;    vL = vR
+            cL = sqrt(g*max(hL,0.0))
+            cR = sqrt(g*max(hR,0.0))
+            ap = max(0.0, uL + cL, uR + cR)
+            am = min(0.0, uL - cL, uR - cR)
             denom = ap - am
-
             if denom <= 1e-14
                 F[1,1,j] = 0.0; F[2,1,j] = 0.0; F[3,1,j] = 0.0
             else
-                qL = hL*uL
-                qR = hR*uR
+                qL = hL*uL; qR = hR*uR
                 F[1,1,j] = (ap*qL - am*qR)/denom + (ap*am/denom)*(hR - hL)
                 FL2 = hL*uL*uL + 0.5*g*hL*hL
                 FR2 = hR*uR*uR + 0.5*g*hR*hR
                 F[2,1,j] = (ap*FL2 - am*FR2)/denom + (ap*am/denom)*(qR - qL)
-                if (uL + uR) > 0.0
-                    F[3,1,j] = qL*vL
-                else
-                    F[3,1,j] = qR*vR
-                end
+                F[3,1,j] = (uL + uR) > 0 ? qL*vL : qR*vR
             end
-            # RIGHT boundary: ghost cell (i=Nx+1) mirrored from cell Nx
-            hL = hE[Nx,j]; uL = uE[Nx,j]; vL = vE[Nx,j]
-            hR = hL;       uR = -uL;      vR =  vL
+
+            # RIGHT boundary
+            hL = hE[nx,j]; uL = uE[nx,j]; vL = vE[nx,j]
+            hR = hL;       uR = -uL;     vR = vL
             cL = sqrt(g*max(hL,0.0))
             cR = sqrt(g*max(hR,0.0))
             ap = max(0.0, uL + cL, uR + cR)
             am = min(0.0, uL - cL, uR - cR)
             denom = ap - am
             if denom <= 1e-14
-                F[1,Nx+1,j] = 0.0; F[2,Nx+1,j] = 0.0; F[3,Nx+1,j] = 0.0
+                F[1,nx+1,j] = 0.0; F[2,nx+1,j] = 0.0; F[3,nx+1,j] = 0.0
             else
-                qL = hL*uL
-                qR = hR*uR
-                F[1,Nx+1,j] = (ap*qL - am*qR)/denom + (ap*am/denom)*(hR - hL)
+                qL = hL*uL; qR = hR*uR
+                F[1,nx+1,j] = (ap*qL - am*qR)/denom + (ap*am/denom)*(hR - hL)
                 FL2 = hL*uL*uL + 0.5*g*hL*hL
                 FR2 = hR*uR*uR + 0.5*g*hR*hR
-                F[2,Nx+1,j] = (ap*FL2 - am*FR2)/denom + (ap*am/denom)*(qR - qL)
-                if (uL + uR) > 0.0
-                    F[3,Nx+1,j] = qL*vL
-                else
-                    F[3,Nx+1,j] = qR*vR
-                end
+                F[2,nx+1,j] = (ap*FL2 - am*FR2)/denom + (ap*am/denom)*(qR - qL)
+                F[3,nx+1,j] = (uL + uR) > 0 ? qL*vL : qR*vR
             end
         end
+
     elseif bc === :outflow
-        @inbounds for j in 1:Ny
-            # zero-gradient: copy neighbouring interior face
+        @inbounds for j in 1:ny
             F[:,1,j]    .= F[:,2,j]
-            F[:,Nx+1,j] .= F[:,Nx,j]
+            F[:,nx+1,j] .= F[:,nx,j]
         end
 
     elseif bc === :periodic
-        @inbounds for j in 1:Ny
-            # periodic face between cell Nx and cell 1
-            hL = hE[Nx,j]; uL = uE[Nx,j]; vL = vE[Nx,j]
-            hR = hW[1,j];  uR = uW[1,j];  vR = vW[1,j]
+        @inbounds for j in 1:ny
+            # face between cell nx and cell 1
+            hL = hE[nx,j]; uL = uE[nx,j]; vL = vE[nx,j]
+            hR = hW[1, j]; uR = uW[1, j]; vR = vW[1, j]
             cL = sqrt(g*max(hL,0.0))
             cR = sqrt(g*max(hR,0.0))
             ap = max(0.0, uL + cL, uR + cR)
@@ -583,31 +733,25 @@ function build_F(hE, hW, uE, uW, vE, vW, g, bc::Symbol)
             denom = ap - am
 
             if denom <= 1e-14
-                F[1,1,j]    = 0.0
-                F[2,1,j]    = 0.0
-                F[3,1,j]    = 0.0
-                F[1,Nx+1,j] = 0.0
-                F[2,Nx+1,j] = 0.0
-                F[3,Nx+1,j] = 0.0
+                F[1,1,j]    = 0.0; F[2,1,j]    = 0.0; F[3,1,j]    = 0.0
+                F[1,nx+1,j] = 0.0; F[2,nx+1,j] = 0.0; F[3,nx+1,j] = 0.0
                 continue
             end
 
-            qL = hL*uL
-            qR = hR*uR
+            qL = hL*uL; qR = hR*uR
 
             Fh = (ap*qL - am*qR)/denom + (ap*am/denom)*(hR - hL)
             FL2 = hL*uL*uL + 0.5*g*hL*hL
             FR2 = hR*uR*uR + 0.5*g*hR*hR
             Fhu = (ap*FL2 - am*FR2)/denom + (ap*am/denom)*(qR - qL)
-            Fhv = (uL + uR) > 0.0 ? qL*vL : qR*vR
+            Fhv = (uL + uR) > 0 ? qL*vL : qR*vR
 
-            # same flux enters at left and leaves at right
             F[1,1,j]    = Fh
             F[2,1,j]    = Fhu
             F[3,1,j]    = Fhv
-            F[1,Nx+1,j] = Fh
-            F[2,Nx+1,j] = Fhu
-            F[3,Nx+1,j] = Fhv
+            F[1,nx+1,j] = Fh
+            F[2,nx+1,j] = Fhu
+            F[3,nx+1,j] = Fhv
         end
     else
         error("Unknown bc = $bc in build_F")
@@ -616,38 +760,44 @@ function build_F(hE, hW, uE, uW, vE, vW, g, bc::Symbol)
     return F
 end
 
-
-# Build G fluxes in y-direction
 function build_G(hN, hS, uN, uS, vN, vS, g, bc::Symbol)
-    Nx, Ny = size(hN)
-    @assert size(hS) == (Nx,Ny)
-    @assert size(uN) == (Nx,Ny) == size(uS) == size(vN) == size(vS)
+    nx, ny = size(hN)
+    @assert size(hS) == (nx, ny)
+    @assert size(uN) == (nx, ny) == size(uS) == size(vN) == size(vS)
 
-    G = zeros(Float64, 3, Nx, Ny+1)
+    G = zeros(Float64, 3, nx, ny+1)
 
-    # ---------- interior faces ----------
-    @inbounds for i in 1:Nx, j in 1:Ny-1
+    # Interior faces
+    @inbounds for i in 1:nx, j in 1:ny-1
         hD = hN[i,j];   uD = uN[i,j];   vD = vN[i,j]
         hU = hS[i,j+1]; uU = uS[i,j+1]; vU = vS[i,j+1]
-        cD = sqrt(g*max(hD,0.0))
-        cU = sqrt(g*max(hU,0.0))
-        bp = max(0.0, vD + cD, vU + cU)
-        bm = min(0.0, vD - cD, vU - cU)
-        denom = bp - bm
 
+        cD = sqrt(g*max(hD, 0.0))
+        cU = sqrt(g*max(hU, 0.0))
+        bp = max(0.0, vD + cD, vU + cU)   # b^+ (3.11)
+        bm = min(0.0, vD - cD, vU - cU)   # b^- (3.11)
+        denom = bp - bm
         fj = j + 1
+
         if denom <= 1e-14
             G[1,i,fj] = 0.0
             G[2,i,fj] = 0.0
             G[3,i,fj] = 0.0
             continue
         end
+
         qyD = hD*vD
         qyU = hU*vU
+
+        # G(1) (3.5)
         G[1,i,fj] = (bp*qyD - bm*qyU)/denom + (bp*bm/denom)*(hU - hD)
+
+        # G(3) (3.6)
         GL3 = hD*vD*vD + 0.5*g*hD*hD
         GR3 = hU*vU*vU + 0.5*g*hU*hU
         G[3,i,fj] = (bp*GL3 - bm*GR3)/denom + (bp*bm/denom)*(qyU - qyD)
+
+        # G(2): upwind in u (3.7)
         if (vD + vU) > 0.0
             G[2,i,fj] = hD*uD*vD
         else
@@ -655,9 +805,10 @@ function build_G(hN, hS, uN, uS, vN, vS, g, bc::Symbol)
         end
     end
 
-    # ---------- boundary faces ----------
-     if bc === :reflective
-        @inbounds for i in 1:Nx
+    # Boundaries
+    if bc === :reflective
+        @inbounds for i in 1:nx
+            # BOTTOM
             hU = hS[i,1]; uU = uS[i,1]; vU = vS[i,1]
             hD = hU;      uD = uU;      vD = -vU
             cD = sqrt(g*max(hD,0.0))
@@ -666,25 +817,18 @@ function build_G(hN, hS, uN, uS, vN, vS, g, bc::Symbol)
             bm = min(0.0, vD - cD, vU - cU)
             denom = bp - bm
             if denom <= 1e-14
-                G[1,i,1] = 0.0
-                G[2,i,1] = 0.0
-                G[3,i,1] = 0.0
+                G[1,i,1] = 0.0; G[2,i,1] = 0.0; G[3,i,1] = 0.0
             else
-                qyD = hD*vD
-                qyU = hU*vU
+                qyD = hD*vD; qyU = hU*vU
                 G[1,i,1] = (bp*qyD - bm*qyU)/denom + (bp*bm/denom)*(hU - hD)
                 GL3 = hD*vD*vD + 0.5*g*hD*hD
                 GR3 = hU*vU*vU + 0.5*g*hU*hU
                 G[3,i,1] = (bp*GL3 - bm*GR3)/denom + (bp*bm/denom)*(qyU - qyD)
-                if (vD + vU) > 0.0
-                    G[2,i,1] = hD*uD*vD
-                else
-                    G[2,i,1] = hU*uU*vU
-                end
+                G[2,i,1] = (vD + vU) > 0 ? hD*uD*vD : hU*uU*vU
             end
 
-            # TOP boundary: ghost above (j=Ny+1) mirrors cell j=Ny
-            hD = hN[i,Ny]; uD = uN[i,Ny]; vD = vN[i,Ny]
+            # TOP
+            hD = hN[i,ny]; uD = uN[i,ny]; vD = vN[i,ny]
             hU = hD;       uU = uD;       vU = -vD
             cD = sqrt(g*max(hD,0.0))
             cU = sqrt(g*max(hU,0.0))
@@ -692,178 +836,170 @@ function build_G(hN, hS, uN, uS, vN, vS, g, bc::Symbol)
             bm = min(0.0, vD - cD, vU - cU)
             denom = bp - bm
             if denom <= 1e-14
-                G[1,i,Ny+1] = 0.0
-                G[2,i,Ny+1] = 0.0
-                G[3,i,Ny+1] = 0.0
+                G[1,i,ny+1] = 0.0; G[2,i,ny+1] = 0.0; G[3,i,ny+1] = 0.0
             else
-                qyD = hD*vD
-                qyU = hU*vU
-                G[1,i,Ny+1] = (bp*qyD - bm*qyU)/denom + (bp*bm/denom)*(hU - hD)
+                qyD = hD*vD; qyU = hU*vU
+                G[1,i,ny+1] = (bp*qyD - bm*qyU)/denom + (bp*bm/denom)*(hU - hD)
                 GL3 = hD*vD*vD + 0.5*g*hD*hD
                 GR3 = hU*vU*vU + 0.5*g*hU*hU
-                G[3,i,Ny+1] = (bp*GL3 - bm*GR3)/denom + (bp*bm/denom)*(qyU - qyD)
-                if (vD + vU) > 0.0
-                    G[2,i,Ny+1] = hD*uD*vD
-                else
-                    G[2,i,Ny+1] = hU*uU*vU
-                end
+                G[3,i,ny+1] = (bp*GL3 - bm*GR3)/denom + (bp*bm/denom)*(qyU - qyD)
+                G[2,i,ny+1] = (vD + vU) > 0 ? hD*uD*vD : hU*uU*vU
             end
         end
-    elseif bc === :outflow
-        @inbounds for i in 1:Nx
-            G[:,i,1]     .= G[:,i,2]
-            G[:,i,Ny+1]  .= G[:,i,Ny]
-        end
-    elseif bc === :periodic
-        @inbounds for i in 1:Nx
-            # periodic face between cell Ny and cell 1
-            hD = hN[i,Ny];   uD = uN[i,Ny];   vD = vN[i,Ny]
-            hU = hS[i,1];    uU = uS[i,1];    vU = vS[i,1]
 
+    elseif bc === :outflow
+        @inbounds for i in 1:nx
+            G[:,i,1]     .= G[:,i,2]
+            G[:,i,ny+1]  .= G[:,i,ny]
+        end
+
+    elseif bc === :periodic
+        @inbounds for i in 1:nx
+            # face between cell ny and cell 1
+            hD = hN[i,ny];   uD = uN[i,ny];   vD = vN[i,ny]
+            hU = hS[i,1];    uU = uS[i,1];    vU = vS[i,1]
             cD = sqrt(g*max(hD,0.0))
             cU = sqrt(g*max(hU,0.0))
             bp = max(0.0, vD + cD, vU + cU)
             bm = min(0.0, vD - cD, vU - cU)
             denom = bp - bm
             if denom <= 1e-14
-                G[1,i,1]     = 0.0
-                G[2,i,1]     = 0.0
-                G[3,i,1]     = 0.0
-                G[1,i,Ny+1]  = 0.0
-                G[2,i,Ny+1]  = 0.0
-                G[3,i,Ny+1]  = 0.0
+                G[1,i,1]    = 0.0; G[2,i,1]    = 0.0; G[3,i,1]    = 0.0
+                G[1,i,ny+1] = 0.0; G[2,i,ny+1] = 0.0; G[3,i,ny+1] = 0.0
                 continue
             end
-            qyD = hD*vD
-            qyU = hU*vU
-            Gh = (bp*qyD - bm*qyU)/denom + (bp*bm/denom)*(hU - hD)
+
+            qyD = hD*vD; qyU = hU*vU
+            Gh  = (bp*qyD - bm*qyU)/denom + (bp*bm/denom)*(hU - hD)
             GL3 = hD*vD*vD + 0.5*g*hD*hD
             GR3 = hU*vU*vU + 0.5*g*hU*hU
             Ghv = (bp*GL3 - bm*GR3)/denom + (bp*bm/denom)*(qyU - qyD)
-            Ghu = (vD + vU) > 0.0 ? hD*uD*vD : hU*uU*vU
-            G[1,i,1]     = Gh
-            G[2,i,1]     = Ghu
-            G[3,i,1]     = Ghv
-            G[1,i,Ny+1]  = Gh
-            G[2,i,Ny+1]  = Ghu
-            G[3,i,Ny+1]  = Ghv
+            Ghu = (vD + vU) > 0 ? hD*uD*vD : hU*uU*vU
+
+            G[1,i,1]    = Gh
+            G[2,i,1]    = Ghu
+            G[3,i,1]    = Ghv
+            G[1,i,ny+1] = Gh
+            G[2,i,ny+1] = Ghu
+            G[3,i,ny+1] = Ghv
         end
     else
         error("Unknown bc = $bc in build_G")
     end
+
     return G
 end
 
+# =========================
+# Source terms S^B and S^C (3.8)–(3.9)
+# =========================
 
-# Bathymetry source S^B with periodic-aware differences
 function build_S_B(h, Bfx, Bfy, g, dx, dy, bc::Symbol)
-    Nx, Ny = size(h)
-    @assert size(Bfx) == (Nx+1, Ny)
-    @assert size(Bfy) == (Nx,   Ny+1)
+    nx, ny = size(h)
+    @assert size(Bfx) == (nx+1, ny)
+    @assert size(Bfy) == (nx,   ny+1)
 
-    SB = zeros(Float64, 3, Nx, Ny)
+    SB = zeros(Float64, 3, nx, ny)
 
-    @inbounds for i in 1:Nx, j in 1:Ny
+    @inbounds for i in 1:nx, j in 1:ny
         hij = h[i,j]
 
+        # Bj+1/2,k - Bj-1/2,k, etc. (3.8)
         if bc === :periodic
-            ip = (i == Nx) ? 1  : i+1   # wrap in x
-            jp = (j == Ny) ? 1  : j+1   # wrap in y
+            ip = (i == nx) ? 1 : i+1
+            jp = (j == ny) ? 1 : j+1
             dBdx = (Bfx[ip, j] - Bfx[i, j]) / dx
             dBdy = (Bfy[i, jp] - Bfy[i, j]) / dy
         else
-            # standard one-sided differences (as before)
             dBdx = (Bfx[i+1, j] - Bfx[i, j]) / dx
             dBdy = (Bfy[i, j+1] - Bfy[i, j]) / dy
         end
 
-        SB[2,i,j] = -g * hij * dBdx
-        SB[3,i,j] = -g * hij * dBdy
+        SB[2,i,j] = -g*hij*dBdx
+        SB[3,i,j] = -g*hij*dBdy
     end
 
     return SB
 end
 
-
-
-# Coriolis source S^C
 function build_S_C(h, u, v, f)
-    Nx, Ny = size(h)
-    @assert size(u) == (Nx,Ny)
-    @assert size(v) == (Nx,Ny)
-    @assert size(f) == (Nx,Ny)
-    SC = zeros(Float64, 3, Nx, Ny)
-    @inbounds for i in 1:Nx, j in 1:Ny
+    nx, ny = size(h)
+    @assert size(u) == (nx, ny)
+    @assert size(v) == (nx, ny)
+    @assert size(f) == (nx, ny)
+
+    SC = zeros(Float64, 3, nx, ny)
+    @inbounds for i in 1:nx, j in 1:ny
         fij = f[i,j]
-        hu  = h[i,j] * u[i,j]
-        hv  = h[i,j] * v[i,j]
-        SC[2,i,j] =  fij * hv
-        SC[3,i,j] = -fij * hu
+        hu  = h[i,j]*u[i,j]
+        hv  = h[i,j]*v[i,j]
+        SC[2,i,j] =  fij*hv   # (3.9)
+        SC[3,i,j] = -fij*hu
     end
     return SC
 end
 
+# =========================
+# Residual: semi-discrete CU scheme (3.1)
+# =========================
 
 function residual!(st::State, p::Params)
     q  = st.q
     dq = st.dq
 
-    _, Nx, Ny = size(q)  # here Nx,Ny are the physical cells (no ghosts in q)
-    @assert Nx == p.nx && Ny == p.ny
+    _, nx, ny = size(q)
+    @assert nx == p.nx && ny == p.ny
 
-    # Interior conservative views
-    h  = @view q[1, :, :]
-    hu = @view q[2, :, :]
-    hv = @view q[3, :, :]
+    # Views into conservative variables
+    @views begin
+        h  = q[1, :, :]
+        hu = q[2, :, :]
+        hv = q[3, :, :]
 
-    dh  = @view dq[1, :, :]
-    dhu = @view dq[2, :, :]
-    dhv = @view dq[3, :, :]
+        dh  = dq[1, :, :]
+        dhu = dq[2, :, :]
+        dhv = dq[3, :, :]
+    end
 
-    # --------------------------------------------------
-    # 1) Build ghosted conservative vars for BC handling
-    # --------------------------------------------------
-    hg  = zeros(Float64, Nx+2, Ny+2)
+    # 1) build ghosted conservative vars
+    hg  = zeros(Float64, nx+2, ny+2)
     hug = similar(hg)
     hvg = similar(hg)
 
     @inbounds begin
-        hg[2:Nx+1, 2:Ny+1]  .= h
-        hug[2:Nx+1, 2:Ny+1] .= hu
-        hvg[2:Nx+1, 2:Ny+1] .= hv
+        hg[2:nx+1, 2:ny+1]  .= h
+        hug[2:nx+1, 2:ny+1] .= hu
+        hvg[2:nx+1, 2:ny+1] .= hv
     end
 
     fill_ghosts_huv!(hg, hug, hvg; bc=p.bc)
 
-    # interior views (updated by ghost BCs)
-    hI  = @view hg[2:Nx+1, 2:Ny+1]
-    huI = @view hug[2:Nx+1, 2:Ny+1]
-    hvI = @view hvg[2:Nx+1, 2:Ny+1]
+    @views begin
+        hI  = hg[2:nx+1, 2:ny+1]
+        huI = hug[2:nx+1, 2:ny+1]
+        hvI = hvg[2:nx+1, 2:ny+1]
+    end
 
-    # --------------------------------------------------
-    # 2) Velocities and equilibrium variables
-    # --------------------------------------------------
+    # 2) velocities and equilibrium variables (Section 2)
     u, v = build_velocities(p.x, p.y, hI, huI, hvI, p.Hmin)
 
-    Uface, Vface, Uc, Vc, K, L = build_UV_KL(hI, u, v, st.f, st.Bc,
-                                             p.dx, p.dy, p.g)
+    Uface, Vface, _, _, K, L =
+        build_UV_KL(hI, u, v, st.f, st.Bc, p.dx, p.dy, p.g)
 
     # 3) reconstruct p = (u,v,K,L)
     uE,uW,uN,uS,
     vE,vW,vN,vS,
     KE,KW,KN,KS,
-    LE,LW,LN,LS = reconstruct_p(u, v, K, L;
+    LE,LW,LN,LS = reconstruct_p(u, v, K, L, p.dx, p.dy;
                                 limiter=p.limiter, bc=p.bc)
 
-    # 4) reconstruct h using primitives and well-balanced formulas
+    # 4) reconstruct h using well-balanced formulas (2.14)
     hE,hW,hN,hS = reconstruct_h(hI, Uface, Vface, KE, KW, LN, LS,
                                 st.Bfx, st.Bfy, p.g)
 
-    # --------------------------------------------------
-    # 5) Fluxes and sources (use p.bc for consistency)
-    # --------------------------------------------------
-    st.F  .= build_F(hE, hW, uE, uW, vE, vW, p.g, p.bc)          # (3, Nx+1, Ny)
-    st.G  .= build_G(hN, hS, uN, uS, vN, vS, p.g, p.bc)          # (3, Nx,   Ny+1)
+    # 5) fluxes and sources
+    st.F  .= build_F(hE, hW, uE, uW, vE, vW, p.g, p.bc)
+    st.G  .= build_G(hN, hS, uN, uS, vN, vS, p.g, p.bc)
     st.SB .= build_S_B(hI, st.Bfx, st.Bfy, p.g, p.dx, p.dy, p.bc)
     st.SC .= build_S_C(hI, u, v, st.f)
 
@@ -872,10 +1008,8 @@ function residual!(st::State, p::Params)
     SB = st.SB
     SC = st.SC
 
-    # --------------------------------------------------
-    # 6) Compute residuals for interior cells
-    # --------------------------------------------------
-    @inbounds for i in 1:Nx, j in 1:Ny
+    # 6) residual (3.1)
+    @inbounds for i in 1:nx, j in 1:ny
         dF1 = (F[1,i+1,j] - F[1,i,j]) / p.dx
         dF2 = (F[2,i+1,j] - F[2,i,j]) / p.dx
         dF3 = (F[3,i+1,j] - F[3,i,j]) / p.dx
@@ -892,29 +1026,29 @@ function residual!(st::State, p::Params)
     return nothing
 end
 
-
 # =========================
 # Time integration: SSP-RK2 (Heun)
+# (Paper uses SSP-RK3, but any SSP RK is fine; cf. Remark 3.2.)
 # =========================
+
 function step_RK2!(st::State, p::Params)
     q   = st.q
     dq  = st.dq
     q1  = st.q_stage
 
     # Stage 1: q¹ = qⁿ + dt * R(qⁿ)
-    residual!(st, p)          # fills st.dq based on current st.q
-    @. q1 = q + p.dt * dq     # q1 = q + dt*dq
+    residual!(st, p)
+    @. q1 = q + p.dt*dq
 
-    # Temporarily swap q → q1 to compute R(q¹)
+    # Stage 2: qⁿ⁺¹ = ½( qⁿ + q¹ + dt * R(q¹) )
     q_orig = st.q
     st.q = q1
-    residual!(st, p)          # now dq = R(q1)
-    st.q = q_orig             # restore
+    residual!(st, p)     # dq = R(q1)
+    st.q = q_orig
 
-    # Stage 2: qⁿ⁺¹ = ½ ( qⁿ + q¹ + dt * R(q¹) )
-    @. q = 0.5 * (q + q1 + p.dt * dq)
+    @. q = 0.5*(q + q1 + p.dt*dq)
 
-    # Sync scalar fields from q
+    # sync scalar fields
     @views begin
         st.h  .= q[1, :, :]
         st.hu .= q[2, :, :]
@@ -924,23 +1058,33 @@ function step_RK2!(st::State, p::Params)
     return nothing
 end
 
-# Added function to initialize state and parameters (constructs bathymetry and coriolis)
+# =========================
+# Initialization helper
+# =========================
+
 function init_state(x, y, bfun, f_hat, beta;
-                    g, dt, Hmin, limiter=:minmod, bc=:reflective)
+                    g::Float64,
+                    dt::Float64,
+                    Hmin::Float64,
+                    limiter::Symbol = :minmod,
+                    bc::Symbol = :reflective)
 
     nx, ny = length(x), length(y)
     dx, dy = x[2]-x[1], y[2]-y[1]
-    # Must build the bathymetry first
-    Bc, Bfx, Bfy, Bcorner = build_Btilde(x, y, bfun)
-    # Build coriolis parameter
-    f = build_f(x, y, f_hat, beta)  
 
-    # Conservative vars
+    # Bathymetry (2.1)–(2.3)
+    Bc, Bfx, Bfy, Bcorner = build_Btilde(x, y, bfun)
+
+    # Coriolis parameter
+    f = build_f(x, y, f_hat, beta)
+
+    # Conservative vars (start from rest)
     h  = zeros(nx, ny)
     hu = zeros(nx, ny)
     hv = zeros(nx, ny)
+
     q = zeros(3, nx, ny)
-    @views begin 
+    @views begin
         q[1, :, :] .= h
         q[2, :, :] .= hu
         q[3, :, :] .= hv
@@ -948,16 +1092,16 @@ function init_state(x, y, bfun, f_hat, beta;
 
     # Work arrays
     F  = zeros(3, nx+1, ny)
-    G  = zeros(3, nx, ny+1)
-    SB = zeros(3, nx, ny)
-    SC = zeros(3, nx, ny)
-    dq = zeros(3, nx, ny)
+    G  = zeros(3, nx,   ny+1)
+    SB = zeros(3, nx,   ny)
+    SC = zeros(3, nx,   ny)
+    dq = zeros(3, nx,   ny)
     q_stage = similar(dq)
 
     p  = Params(x, y, nx, ny, dx, dy, g, dt, Hmin, limiter, bc)
     st = State(h, hu, hv, q, Bc, Bfx, Bfy, Bcorner, f, F, G, SB, SC, dq, q_stage)
+
     return st, p
 end
-
 
 end # module

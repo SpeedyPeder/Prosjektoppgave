@@ -137,16 +137,33 @@ function build_f(x, y, f_hat, beta)
 end
 
 # Primitives U_y = f/g * u and V_x = f/g * v 
-function build_UV_KL(h, u, v, f, Bc, dx, dy, g)
+function build_UV_KL(h, u, v, f, Bc, dx, dy, g; bc::Symbol=:reflective)
     Nx, Ny = size(u)
     Uface = zeros(Float64, Nx, Ny+1)
     @inbounds for i in 1:Nx, j in 1:Ny
         Uface[i,j+1] = Uface[i,j] + (f[i,j]/g) * u[i,j] * dy
     end
+
     Vface = zeros(Float64, Nx+1, Ny)
     @inbounds for j in 1:Ny, i in 1:Nx
         Vface[i+1,j] = Vface[i,j] + (f[i,j]/g) * v[i,j] * dx
     end
+
+    if bc === :periodic
+        @inbounds for i in 1:Nx
+            jump = Uface[i,Ny+1] - Uface[i,1]
+            for j in 1:Ny+1
+                Uface[i,j] -= (j-1)/Ny * jump
+            end
+        end
+        @inbounds for j in 1:Ny
+            jump = Vface[Nx+1,j] - Vface[1,j]
+            for i in 1:Nx+1
+                Vface[i,j] -= (i-1)/Nx * jump
+            end
+        end
+    end
+
     Uc = @. 0.5 * (Uface[:,1:end-1] + Uface[:,2:end])
     Vc = @. 0.5 * (Vface[1:end-1,:] + Vface[2:end,:])
 
@@ -691,7 +708,7 @@ function residual!(st::State, p::Params)
     # 2) UVKL
     Uface, Vface, Uc, Vc, K, L =
     build_UV_KL(h, u, v, st.f, st.Bc,
-                p.dx, p.dy, p.g)
+                p.dx, p.dy, p.g, bc = p.bc)
    
 
     # 3) reconstruct p = (u,v,K,L)

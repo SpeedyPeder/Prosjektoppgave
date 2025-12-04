@@ -4,17 +4,17 @@ import .RotSW_CDKLM
 using Plots; theme(:default)
 
 limiter = :minmod
-steps   = 1000
+steps   = 100000
 nx, ny  = 100, 100
 dx, dy  = 1000, 1000
 g       = 9.81
-dt      = 0.5
+dt      = 0.1
 bc      = :periodic
 Hmin    = 1e-3
 
 # --- Coriolis: β–plane -------------------------------------
-f0   = 1e-4         # base Coriolis parameter (s⁻¹)
-beta = 1e-8     
+f0   = 1    # base Coriolis parameter (s⁻¹)
+beta = 0     
 
 x = collect(range(0, step=dx, length=nx))
 y = collect(range(0, step=dy, length=ny))
@@ -23,12 +23,14 @@ y = collect(range(0, step=dy, length=ny))
 # Example: a smooth Gaussian bump in the middle (in meters)
 x0 = x[end]/2
 y0 = y[end]/2
-Lx = x[end]/6
-Ly = y[end]/6
+Lx = x[end]/2
+Ly = y[end]/2
 
-bfun(x,y) = 2 * exp(-((x - x0)^2 / Lx^2 + (y - y0)^2 / Ly^2))   # 
+bfun(x,y) = 2*sin(2π * x / Lx)# 
+
 
 st, p = RotSW_CDKLM.init_state(x, y, bfun, f0, beta; g=g, dt=dt, Hmin=Hmin, limiter=limiter, bc=bc)
+
 
 # --- Lake at rest IC: w = const ------------------------------
 # --- Initial condition: lake-at-rest free surface + uniform velocity ----
@@ -38,8 +40,8 @@ w0 = 10.0                      # equilibrium free surface level (m)
 st.h .= w0 .- st.Bc
 
 # choose initial velocities (u in x, v in y)
-u0 = 0.1    # m/s, 
-v0 = 0.0    # m/s, 
+u0 = 0.5    # m/s, 
+v0 = 0.5    # m/s, 
 
 # momentum = h * velocity
 st.hu .= st.h .* u0    # x-momentum h*u
@@ -61,6 +63,7 @@ println("Testing lake-at-rest initial state, w0 = $w0")
 M0  = total_mass(st, p)
 println("Initial: mass = $M0")
 println("Coriolis: f ∈ [$(minimum(st.f)), $(maximum(st.f))]")
+
 
 for n in 1:steps
     RotSW_CDKLM.step_RK2!(st, p)
