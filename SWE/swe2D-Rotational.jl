@@ -16,7 +16,7 @@ bc      = :periodic
 Hmin    = 1e-8
 
 # --- Coriolis ---------------------------------------------
-f0   = 1     # must be ≠ 0 for geostrophic v = g/f * h_x
+f0   = 1e-4     # must be ≠ 0 for geostrophic v = g/f * h_x
 beta = 0.0
 
 x = collect(range(0, step=dx, length=nx))
@@ -239,13 +239,15 @@ pltVSection = plot(xs, v_init[:, jmid];
     label = "v(x, y = $(ys[jmid])) at t= 0",
     xlabel = "x (m)", ylabel = "v (m/s)",
     title = "Velocities v(x,y = $(ys[jmid]))",
+    legendfontsize = 6,
+    
 )
 
 # final velocity as dots on top of the line
 scatter!(pltVSection, xs, v[:, jmid];
     markersize = 2.5,
     label = "v(x,y = $(ys[jmid])) at t=$(steps*dt)s",
-    legend = :bottomright,
+    legend = :bottomleft,
 )
 display(pltVSection)
 
