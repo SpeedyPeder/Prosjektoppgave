@@ -111,16 +111,17 @@ function sci_cb_ticks(A; n=7)
         vals = collect(range(zmin, zmax; length=n))
     end
     # "1.0e-3" etc, force dot as decimal separator
-    labels = [replace(@sprintf("%.2e", v), ',' => '.') for v in vals]
+    labels = [replace(@sprintf("%.4e", v), ',' => '.') for v in vals]
     return (vals, labels)
 end
 
 xs = p.x
 ys = p.y
 
-w_init = st.h .+ st.Bc      # free surface at t = 0
+w_init = st.h .+ st.Bc      #surface at t = 0
 u_init = st.hu ./ st.h
 v_init = st.hv ./ st.h
+η = w .- w0   
 
 # mid-line for 1D cross-sections
 jmid = Int(cld(ny, 2))
@@ -131,7 +132,7 @@ jmid = Int(cld(ny, 2))
 plt_h2D = contourf(xs, ys, permutedims(w_init);
     aspect_ratio = :equal,
     xlabel = "x (m)", ylabel = "y (m)",
-    title = "Initial free surface w(x,y)",
+    title = "Initial height: h(x,y), t = 0",
     colorbar = true,
     colorbar_ticks = sci_cb_ticks(w_init),
     colorbar_tickfontsize = 8,
@@ -141,9 +142,9 @@ plt_h2D = contourf(xs, ys, permutedims(w_init);
 # 2) 1D cross-section of height (line)
 plt_h1D = plot(xs, w_init[:, jmid];
     lw = 2,
-    label="w(x, t=0)",
+    label="h(x, y)",
     xlabel="x (m)", ylabel="z (m)",
-    title="Initial height cross-section at y = $(ys[jmid])",
+    title="Initial height: h(x,y = $(ys[jmid])), t = 0",
 )
 
 ########## VELOCITY ##########
@@ -152,7 +153,7 @@ plt_h1D = plot(xs, w_init[:, jmid];
 plt_v2D = contourf(xs, ys, permutedims(v_init);
     aspect_ratio = :equal,
     xlabel = "x (m)", ylabel = "y (m)",
-    title = "Initial v-velocity v(x,y)",
+    title = "Initial v-velocity: v(x,y), t = 0",
     colorbar = true,
     colorbar_ticks = sci_cb_ticks(v_init),
     colorbar_tickfontsize = 8,
@@ -162,9 +163,9 @@ plt_v2D = contourf(xs, ys, permutedims(v_init);
 # 4) 1D cross-section of v (line)
 plt_v1D = plot(xs, v_init[:, jmid];
     lw = 2,
-    label="v(x, t=0)",
+    label="v(x, y = 100), t = 0",
     xlabel="x (m)", ylabel="v (m/s)",
-    title="Initial v cross-section at y = $(ys[jmid])",
+    title="Initial v-velocity: v(x, y = $(ys[jmid])), t = 0",
     legend = :bottomright,
 )
 
@@ -199,7 +200,7 @@ v = st.hv ./ st.h
 pltEta = contourf(xs, ys, permutedims(η);
     aspect_ratio = :equal,
     xlabel = "x (m)", ylabel = "y (m)",
-    title  = "Error w - w0 at t = $(steps*dt) s",
+    title  = "Error = (h- h0) at t = $(steps*dt) s",
     colorbar = true,
     colorbar_ticks = sci_cb_ticks(η),
     colorbar_tickfontsize = 8,
@@ -210,10 +211,8 @@ display(pltEta)
 # 2) 1D error cross-section (line)
 pltErr1D = plot(xs, η[:, jmid];
     lw = 2,
-    label="w(x,t) - w0(x)",
-    xlabel="x (m)", ylabel="error (m)",
-    title="Error cross-section at y = $(ys[jmid]) m",
-    legend = :bottomright,
+    xlabel="x (m)", ylabel="(h-h0) (m)",
+    title="Error = (h- h0) at y = $(ys[jmid]) m, t = $(steps*dt) s",
 )
 display(pltErr1D)
 
@@ -221,15 +220,15 @@ display(pltErr1D)
 
 pltWSection = plot(xs, w0[:, jmid];
     lw = 2,
-    label = "w(x,0)",
+    label = "h(x,y = $(ys[jmid])), at t=0",
     xlabel = "x (m)", ylabel = "z (m)",
-    title = "Free-surface cross-section at y = $(ys[jmid]) m",
+    title = "Heights at h(x, y = $(ys[jmid]))",
 )
 
 # final state as dots on top of the line
 scatter!(pltWSection, xs, w[:, jmid];
     markersize = 2.5,
-    label = "w(x, t=$(steps*dt)s)",
+    label = "h(x,y = $(ys[jmid])), at t=$(steps*dt)s",
 )
 display(pltWSection)
 
@@ -237,15 +236,15 @@ display(pltWSection)
 
 pltVSection = plot(xs, v_init[:, jmid];
     lw = 2,
-    label = "v(x,0)",
+    label = "v(x, y = $(ys[jmid])) at t= 0",
     xlabel = "x (m)", ylabel = "v (m/s)",
-    title = "Velocity cross-section at y = $(ys[jmid]) m",
+    title = "Velocities v(x,y = $(ys[jmid]))",
 )
 
 # final velocity as dots on top of the line
 scatter!(pltVSection, xs, v[:, jmid];
     markersize = 2.5,
-    label = "v(x, t=$(steps*dt)s)",
+    label = "v(x,y = $(ys[jmid])) at t=$(steps*dt)s",
     legend = :bottomright,
 )
 display(pltVSection)
