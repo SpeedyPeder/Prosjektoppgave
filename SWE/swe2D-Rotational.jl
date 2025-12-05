@@ -2,19 +2,21 @@ cd(@__DIR__)
 include("sweSim2D-Rotational.jl")
 import .RotSW_CDKLM
 using Plots; theme(:default)
-using Printf   # <-- for scientific formatting
+pyplot()  
+using Printf   
+using Measures 
 
 limiter = :minmod
-steps   = 100
-nx, ny  = 200, 200
+steps   = 1000
+nx, ny  = 202, 202
 dx, dy  = 1, 1
 g       = 9.81
-dt      = 0.1
+dt      = 0.01
 bc      = :periodic
 Hmin    = 1e-8
 
 # --- Coriolis ---------------------------------------------
-f0   = 1      # must be ≠ 0 for geostrophic v = g/f * h_x
+f0   = 1e-4      # must be ≠ 0 for geostrophic v = g/f * h_x
 beta = 0.0
 
 x = collect(range(0, step=dx, length=nx))
@@ -31,7 +33,7 @@ st, p = RotSW_CDKLM.init_state(x, y, bfun, f0, beta;
 
 Lx = x[end] - x[1] + dx   # = nx*dx
 h0 = 10
-a  = 1e-3                 # bump amplitude (tune as you like)
+a  = 1e-3               # bump amplitude (tune as you like)
 
 # centers of left and right features
 cL = Lx/4
@@ -62,7 +64,7 @@ end
 # Geostrophic equilibrium state
 h_profile(ξ) = h0 + a*cos_bump(ξ, cL, w) - a*cos_bump(ξ, cR, w)
 dh_dx(ξ)     = a*d_cos_bump(ξ, cL, w)   - a*d_cos_bump(ξ, cR, w)
-v_profile(ξ) = (g / f0) * dh_dx(ξ)
+v_profile(ξ) = (g / f0) * dh_dx(ξ) 
 
 # fill grid
 for (i, xi) in enumerate(x)
@@ -96,9 +98,11 @@ println("Coriolis: f ∈ [$(minimum(st.f)), $(maximum(st.f))]")
 RotSW_CDKLM.residual!(st,p)
 println("max |dq| at t=0 = ", maximum(abs.(st.dq)))
 
-###############################
-# Helper for scientific colorbar ticks
-###############################
+
+
+############ Plots ##################################
+
+# helper for scientific colorbar ticks (works with pyplot backend)
 function sci_cb_ticks(A; n=7)
     zmin, zmax = extrema(A)
     if zmin == zmax
@@ -106,13 +110,10 @@ function sci_cb_ticks(A; n=7)
     else
         vals = collect(range(zmin, zmax; length=n))
     end
-    labels = [@sprintf("%.1e", v) for v in vals]
+    # "1.0e-3" etc, force dot as decimal separator
+    labels = [replace(@sprintf("%.1e", v), ',' => '.') for v in vals]
     return (vals, labels)
 end
-
-###############################
-# Plot INITIAL CONDITIONS
-###############################
 
 xs = p.x
 ys = p.y
@@ -133,6 +134,8 @@ plt_h2D = contourf(xs, ys, permutedims(w_init);
     title = "Initial free surface w(x,y)",
     colorbar = true,
     colorbar_ticks = sci_cb_ticks(w_init),
+    colorbar_tickfontsize = 8,
+    right_margin = 12mm,
 )
 
 # 2) 1D cross-section of height (line)
@@ -152,6 +155,8 @@ plt_v2D = contourf(xs, ys, permutedims(v_init);
     title = "Initial v-velocity v(x,y)",
     colorbar = true,
     colorbar_ticks = sci_cb_ticks(v_init),
+    colorbar_tickfontsize = 8,
+    right_margin = 12mm,
 )
 
 # 4) 1D cross-section of v (line)
@@ -196,6 +201,8 @@ pltEta = contourf(xs, ys, permutedims(η);
     title  = "Error w - w0 at t = $(steps*dt) s",
     colorbar = true,
     colorbar_ticks = sci_cb_ticks(η),
+    colorbar_tickfontsize = 8,
+    right_margin = 12mm,
 )
 display(pltEta)
 
@@ -210,37 +217,33 @@ display(pltErr1D)
 
 ########## FINAL VS INITIAL (HEIGHT) ##########
 
-# small horizontal shift for final curve
-
-pltWSection = scatter(xs, w0[:, jmid];
-    markersize = 3,
-    marker = :circle,
-    label="w0(x)",
-    xlabel="x (m)", ylabel="z (m)",
-    title="Free-surface cross-section at y = $(ys[jmid]) m",
+pltWSection = plot(xs, w0[:, jmid];
+    lw = 2,
+    label = "w(x,0)",
+    xlabel = "x (m)", ylabel = "z (m)",
+    title = "Free-surface cross-section at y = $(ys[jmid]) m",
 )
 
-scatter!(pltWSection, xs , w[:, jmid];
-    markersize = 3,
-    marker = :cross,
-    label="w(x, t=$(steps*dt)s)",
+# final state as dots on top of the line
+scatter!(pltWSection, xs, w[:, jmid];
+    markersize = 2.5,
+    label = "w(x, t=$(steps*dt)s)",
 )
 display(pltWSection)
 
 ########## FINAL VS INITIAL (VELOCITY) ##########
 
-pltVSection = scatter(xs, v_init[:, jmid];
-    markersize = 3,
-    marker = :circle,
-    label="v(x,0)",
-    xlabel="x (m)", ylabel="v (m/s)",
-    title="Velocity cross-section at y = $(ys[jmid]) m",
+pltVSection = plot(xs, v_init[:, jmid];
+    lw = 2,
+    label = "v(x,0)",
+    xlabel = "x (m)", ylabel = "v (m/s)",
+    title = "Velocity cross-section at y = $(ys[jmid]) m",
 )
 
+# final velocity as dots on top of the line
 scatter!(pltVSection, xs, v[:, jmid];
-    markersize = 3,
-    marker = :cross,
-    label="v(x,t=$(steps*dt)s)",
+    markersize = 2.5,
+    label = "v(x, t=$(steps*dt)s)",
 )
 display(pltVSection)
 
@@ -252,7 +255,7 @@ display(pltVSection)
 mkpath("Plots_CDKLM")
 
 # prefix such as "f0_1e-4" or "f0_1"
-f_prefix = "f0_" * replace(string(f0), "." => "p")
+f_prefix = "f0=" * replace(string(f0), "." => "p")
 
 # --- Initial condition plots ---
 savefig(plt_h2D,   "Plots_CDKLM/$(f_prefix)_w_initial_2D.png")
