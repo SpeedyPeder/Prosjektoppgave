@@ -2,124 +2,266 @@ cd(@__DIR__)
 include("sweSim2D-Rotational.jl")
 import .RotSW_CDKLM
 using Plots; theme(:default)
+using Printf   # <-- for scientific formatting
 
 limiter = :minmod
-steps   = 100000
-nx, ny  = 100, 100
-dx, dy  = 1000, 1000
+steps   = 100
+nx, ny  = 200, 200
+dx, dy  = 1, 1
 g       = 9.81
 dt      = 0.1
 bc      = :periodic
-Hmin    = 1e-3
+Hmin    = 1e-8
 
-# --- Coriolis: β–plane -------------------------------------
-f0   = 1    # base Coriolis parameter (s⁻¹)
-beta = 0     
+# --- Coriolis ---------------------------------------------
+f0   = 1      # must be ≠ 0 for geostrophic v = g/f * h_x
+beta = 0.0
 
 x = collect(range(0, step=dx, length=nx))
 y = collect(range(0, step=dy, length=ny))
 
-# --- Bathymetry ---------------------------------------------
-# Example: a smooth Gaussian bump in the middle (in meters)
-x0 = x[end]/2
-y0 = y[end]/2
-Lx = x[end]/2
-Ly = y[end]/2
+# For this test: B = 0 (matches your derivation)
+bfun(x,y) = 0.0
 
-bfun(x,y) = 2*sin(2π * x / Lx)# 
+st, p = RotSW_CDKLM.init_state(x, y, bfun, f0, beta;
+                               g=g, dt=dt, Hmin=Hmin,
+                               limiter=limiter, bc=bc)
 
+#############  Geostrophic IC: h(x), u=0, v(x)  #############
 
-st, p = RotSW_CDKLM.init_state(x, y, bfun, f0, beta; g=g, dt=dt, Hmin=Hmin, limiter=limiter, bc=bc)
+Lx = x[end] - x[1] + dx   # = nx*dx
+h0 = 10
+a  = 1e-3                 # bump amplitude (tune as you like)
 
+# centers of left and right features
+cL = Lx/4
+cR = 3Lx/4
+# half-width of each bump (so support is [c-w, c+w])
+w  = Lx/6
 
-# --- Lake at rest IC: w = const ------------------------------
-# --- Initial condition: lake-at-rest free surface + uniform velocity ----
-w0 = 10.0                      # equilibrium free surface level (m)
+# smooth cosine bump (positive) with compact support
+function cos_bump(ξ, c, w)
+    z = (ξ - c)/w
+    if abs(z) <= 1
+        return 0.5 * (1 + cos(π*z))   # 1 at center, 0 at |z|=1
+    else
+        return 0.0
+    end
+end
 
-# depth h = w0 - B(x,y)
-st.h .= w0 .- st.Bc
+# derivative of the bump
+function d_cos_bump(ξ, c, w)
+    z = (ξ - c)/w
+    if abs(z) <= 1
+        return -0.5 * (π/w) * sin(π*z)
+    else
+        return 0.0
+    end
+end
 
-# choose initial velocities (u in x, v in y)
-u0 = 0.5    # m/s, 
-v0 = 0.5    # m/s, 
+# Geostrophic equilibrium state
+h_profile(ξ) = h0 + a*cos_bump(ξ, cL, w) - a*cos_bump(ξ, cR, w)
+dh_dx(ξ)     = a*d_cos_bump(ξ, cL, w)   - a*d_cos_bump(ξ, cR, w)
+v_profile(ξ) = (g / f0) * dh_dx(ξ)
 
-# momentum = h * velocity
-st.hu .= st.h .* u0    # x-momentum h*u
-st.hv .= st.h .* v0    # y-momentum h*v
-
-# sync q
+# fill grid
+for (i, xi) in enumerate(x)
+    hxi = h_profile(xi)
+    vxi = v_profile(xi)
+    for j in 1:ny
+        st.h[i,j]  = hxi
+        st.hu[i,j] = 0.0
+        st.hv[i,j] = hxi * vxi
+    end
+end
 @views begin
     st.q[1,:,:] .= st.h
     st.q[2,:,:] .= st.hu
     st.q[3,:,:] .= st.hv
 end
 
+w0 = copy(st.h)
+
 # --- diagnostics helpers ---
 function total_mass(st, p)
     p.dx * p.dy * sum(st.h)
 end
 
-println("Testing lake-at-rest initial state, w0 = $w0")
+println("Testing geostrophic-like initial state")
 M0  = total_mass(st, p)
 println("Initial: mass = $M0")
 println("Coriolis: f ∈ [$(minimum(st.f)), $(maximum(st.f))]")
 
+# (optional) check residual at t=0
+RotSW_CDKLM.residual!(st,p)
+println("max |dq| at t=0 = ", maximum(abs.(st.dq)))
 
-for n in 1:steps
-    RotSW_CDKLM.step_RK2!(st, p)
-    M  = total_mass(st, p)
-    println("step $n: wmin = $(minimum(st.h + st.Bc)), wmax = $(maximum(st.h + st.Bc)), mass = $M (ΔM = $(M - M0))")
+###############################
+# Helper for scientific colorbar ticks
+###############################
+function sci_cb_ticks(A; n=7)
+    zmin, zmax = extrema(A)
+    if zmin == zmax
+        vals = [zmin]
+    else
+        vals = collect(range(zmin, zmax; length=n))
+    end
+    labels = [@sprintf("%.1e", v) for v in vals]
+    return (vals, labels)
 end
 
-# ======================================================
-# Plots: bathymetry + free surface
-# ======================================================
+###############################
+# Plot INITIAL CONDITIONS
+###############################
 
 xs = p.x
 ys = p.y
 
-# Current free surface and perturbation
-w = st.h .+ st.Bc
-η = w .- w0
-v = st.hv ./ st.h
+w_init = st.h .+ st.Bc      # free surface at t = 0
+u_init = st.hu ./ st.h
+v_init = st.hv ./ st.h
+
+# mid-line for 1D cross-sections
+jmid = Int(cld(ny, 2))
+
+########## HEIGHT ##########
+
+# 1) 2D initial height (free surface) with scientific colorbar labels
+plt_h2D = contourf(xs, ys, permutedims(w_init);
+    aspect_ratio = :equal,
+    xlabel = "x (m)", ylabel = "y (m)",
+    title = "Initial free surface w(x,y)",
+    colorbar = true,
+    colorbar_ticks = sci_cb_ticks(w_init),
+)
+
+# 2) 1D cross-section of height (line)
+plt_h1D = plot(xs, w_init[:, jmid];
+    lw = 2,
+    label="w(x, t=0)",
+    xlabel="x (m)", ylabel="z (m)",
+    title="Initial height cross-section at y = $(ys[jmid])",
+)
+
+########## VELOCITY ##########
+
+# 3) 2D initial v-velocity with scientific colorbar labels
+plt_v2D = contourf(xs, ys, permutedims(v_init);
+    aspect_ratio = :equal,
+    xlabel = "x (m)", ylabel = "y (m)",
+    title = "Initial v-velocity v(x,y)",
+    colorbar = true,
+    colorbar_ticks = sci_cb_ticks(v_init),
+)
+
+# 4) 1D cross-section of v (line)
+plt_v1D = plot(xs, v_init[:, jmid];
+    lw = 2,
+    label="v(x, t=0)",
+    xlabel="x (m)", ylabel="v (m/s)",
+    title="Initial v cross-section at y = $(ys[jmid])",
+)
+
+display(plt_h2D)
+display(plt_h1D)
+display(plt_v2D)
+display(plt_v1D)
+
+#######################
+
+# =======================================================
+# Run Simulation
+# =======================================================
+for n in 1:steps
+    RotSW_CDKLM.step_RK2!(st, p)
+    M  = total_mass(st, p)
+    println("step $n: wmin = $(minimum(st.h)), wmax = $(maximum(st.h)), mass = $M (ΔM = $(M - M0))")
+end
+
+# ======================================================
+# Plots at final time
+# ======================================================
+
+w = st.h .+ st.Bc      # free surface at final time
 u = st.hu ./ st.h
+v = st.hv ./ st.h
+η = w .- w0            # error relative to equilibrium state
 
-# 1) 2D contour of bathymetry
-pltB = contourf(xs, ys, permutedims(st.Bc);
-                aspect_ratio = :equal,
-                xlabel = "x (m)", ylabel = "y (m)",
-                title  = "Bathymetry B(x,y)",
-                colorbar = true)
+########## ERROR (w - w0) ##########
 
-# 2) 2D contour of free-surface perturbation
+# 1) 2D error with scientific colorbar labels
 pltEta = contourf(xs, ys, permutedims(η);
-                  aspect_ratio = :equal,
-                  xlabel = "x (m)", ylabel = "y (m)",
-                  title  = "Free-surface perturbation η at t = $(steps*dt) s",
-                  colorbar = true)
-
-display(pltB)
+    aspect_ratio = :equal,
+    xlabel = "x (m)", ylabel = "y (m)",
+    title  = "Error w - w0 at t = $(steps*dt) s",
+    colorbar = true,
+    colorbar_ticks = sci_cb_ticks(η),
+)
 display(pltEta)
 
-# 3) 1D cross-section: bottom + free surface in the same plot (optional)
-jmid = Int(cld(ny, 2))   # mid row in y
-pltSection = plot(xs, st.Bc[:, jmid], label="bottom B(x, y_mid)", lw=2)
-plot!(xs, w[:, jmid],    label="free surface w(x, y_mid)", lw=2,
-      xlabel="x (m)", ylabel="z (m)",
-      title="Cross-section at y = $(ys[jmid]) m")
-display(pltSection)
+# 2) 1D error cross-section (line)
+pltErr1D = plot(xs, η[:, jmid];
+    lw = 2,
+    label="w(x,t) - w0(x)",
+    xlabel="x (m)", ylabel="error (m)",
+    title="Error cross-section at y = $(ys[jmid]) m",
+)
+display(pltErr1D)
 
-# 4) velocity
-pltv = contourf(xs, ys, u;
-                aspect_ratio = :equal,
-                xlabel = "x (m)", ylabel = "y (m)",
-                title  = "Velocity (u,v)",
-                colorbar = true)
-display(pltv)
-print(maximum(u))
+########## FINAL VS INITIAL (HEIGHT) ##########
 
-mkpath("Plots_CDKLM")   # create folder if it doesn't exist
+# small horizontal shift for final curve
 
-savefig(pltB,       "Plots_CDKLM/bathymetry.png")
-savefig(pltEta,     "Plots_CDKLM/free_surface_η_t$(steps*dt).png")
-savefig(pltSection, "Plots_CDKLM/cross_section_t$(steps*dt).png")
+pltWSection = scatter(xs, w0[:, jmid];
+    markersize = 3,
+    marker = :circle,
+    label="w0(x)",
+    xlabel="x (m)", ylabel="z (m)",
+    title="Free-surface cross-section at y = $(ys[jmid]) m",
+)
+
+scatter!(pltWSection, xs , w[:, jmid];
+    markersize = 3,
+    marker = :cross,
+    label="w(x, t=$(steps*dt)s)",
+)
+display(pltWSection)
+
+########## FINAL VS INITIAL (VELOCITY) ##########
+
+pltVSection = scatter(xs, v_init[:, jmid];
+    markersize = 3,
+    marker = :circle,
+    label="v(x,0)",
+    xlabel="x (m)", ylabel="v (m/s)",
+    title="Velocity cross-section at y = $(ys[jmid]) m",
+)
+
+scatter!(pltVSection, xs, v[:, jmid];
+    markersize = 3,
+    marker = :cross,
+    label="v(x,t=$(steps*dt)s)",
+)
+display(pltVSection)
+
+
+#########################
+# SAVE FIGURES WITH PREFIX
+#########################
+
+mkpath("Plots_CDKLM")
+
+# prefix such as "f0_1e-4" or "f0_1"
+f_prefix = "f0_" * replace(string(f0), "." => "p")
+
+# --- Initial condition plots ---
+savefig(plt_h2D,   "Plots_CDKLM/$(f_prefix)_w_initial_2D.png")
+savefig(plt_h1D,   "Plots_CDKLM/$(f_prefix)_w_initial_1D.png")
+savefig(plt_v2D,   "Plots_CDKLM/$(f_prefix)_v_initial_2D.png")
+savefig(plt_v1D,   "Plots_CDKLM/$(f_prefix)_v_initial_1D.png")
+
+# --- Error and final state plots ---
+savefig(pltEta,      "Plots_CDKLM/$(f_prefix)_eta_t$(steps*dt).png")
+savefig(pltErr1D,    "Plots_CDKLM/$(f_prefix)_eta_cross_section_t$(steps*dt).png")
+savefig(pltWSection, "Plots_CDKLM/$(f_prefix)_w_initial_vs_final_t$(steps*dt).png")
+savefig(pltVSection, "Plots_CDKLM/$(f_prefix)_v_initial_vs_final_t$(steps*dt).png")
