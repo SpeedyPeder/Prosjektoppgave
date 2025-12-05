@@ -111,7 +111,7 @@ function sci_cb_ticks(A; n=7)
         vals = collect(range(zmin, zmax; length=n))
     end
     # "1.0e-3" etc, force dot as decimal separator
-    labels = [replace(@sprintf("%.1e", v), ',' => '.') for v in vals]
+    labels = [replace(@sprintf("%.2e", v), ',' => '.') for v in vals]
     return (vals, labels)
 end
 
@@ -165,6 +165,7 @@ plt_v1D = plot(xs, v_init[:, jmid];
     label="v(x, t=0)",
     xlabel="x (m)", ylabel="v (m/s)",
     title="Initial v cross-section at y = $(ys[jmid])",
+    legend = :bottomright,
 )
 
 display(plt_h2D)
@@ -212,6 +213,7 @@ pltErr1D = plot(xs, η[:, jmid];
     label="w(x,t) - w0(x)",
     xlabel="x (m)", ylabel="error (m)",
     title="Error cross-section at y = $(ys[jmid]) m",
+    legend = :bottomright,
 )
 display(pltErr1D)
 
@@ -244,6 +246,7 @@ pltVSection = plot(xs, v_init[:, jmid];
 scatter!(pltVSection, xs, v[:, jmid];
     markersize = 2.5,
     label = "v(x, t=$(steps*dt)s)",
+    legend = :bottomright,
 )
 display(pltVSection)
 
@@ -255,7 +258,7 @@ display(pltVSection)
 mkpath("Plots_CDKLM")
 
 # prefix such as "f0_1e-4" or "f0_1"
-f_prefix = "f0=" * replace(string(f0), "." => "p")
+f_prefix = "f0=" * replace(string(f0))
 
 # --- Initial condition plots ---
 savefig(plt_h2D,   "Plots_CDKLM/$(f_prefix)_w_initial_2D.png")
