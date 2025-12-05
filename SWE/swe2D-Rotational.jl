@@ -16,7 +16,7 @@ bc      = :periodic
 Hmin    = 1e-8
 
 # --- Coriolis ---------------------------------------------
-f0   = 1e-4     # must be ≠ 0 for geostrophic v = g/f * h_x
+f0   = 1     # must be ≠ 0 for geostrophic v = g/f * h_x
 beta = 0.0
 
 x = collect(range(0, step=dx, length=nx))
@@ -33,7 +33,7 @@ st, p = RotSW_CDKLM.init_state(x, y, bfun, f0, beta;
 
 Lx = x[end] - x[1] + dx   # = nx*dx
 h0 = 10
-a  = 1e-3               # bump amplitude (tune as you like)
+a  = 10              # bump amplitude (tune as you like)
 
 # centers of left and right features
 cL = Lx/4
@@ -251,7 +251,7 @@ scatter!(pltVSection, xs, v[:, jmid];
 )
 display(pltVSection)
 
-
+"""
 #########################
 # SAVE FIGURES WITH PREFIX
 #########################
@@ -272,3 +272,4 @@ savefig(pltEta,      "Plots_CDKLM/$(f_prefix)_eta_t$(steps*dt).png")
 savefig(pltErr1D,    "Plots_CDKLM/$(f_prefix)_eta_cross_section_t$(steps*dt).png")
 savefig(pltWSection, "Plots_CDKLM/$(f_prefix)_w_initial_vs_final_t$(steps*dt).png")
 savefig(pltVSection, "Plots_CDKLM/$(f_prefix)_v_initial_vs_final_t$(steps*dt).png")
+"""
