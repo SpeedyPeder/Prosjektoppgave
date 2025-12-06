@@ -38,7 +38,7 @@ end
 g   = sweSim1D.g
 cL  = sqrt(g*hl)
 
-# If your DambreakAnalytic module handles hr≈0 with solve_hm, reuse it:
+
 hm  = DambreakAnalytic.solve_hm(hl, hr; g=g)
 cm  = sqrt(g*hm)
 um  = 2*(cL - cm)
@@ -99,8 +99,8 @@ for t in valid_times
     bT = bfun(x_snap)
     hT = @. ηT - bT            # numeric depth at time t
     h_ex, _ = DambreakAnalytic.stoker_solution(x_snap, t; hl=hl, hr=hr, x0=x0, g=g)
-    plot!(plt, x_snap, h_ex, lw=2.5, label="h exact t=$(round(t,digits=2))")
-    plot!(plt, x_snap, hT,  lw=1.5, ls=:dash, label="h num (KP) t=$(round(t,digits=2))")
+    plot!(plt, x_snap, h_ex, lw=2.5, label="h exact, t=$(round(t,digits=2))")
+    plot!(plt, x_snap, hT,  lw=1.5, ls=:dash, label="h num, t=$(round(t,digits=2))")
 end
 display(plt)
 savefig(joinpath(save_dir, "KP_snapshots.png"))
@@ -120,7 +120,7 @@ function animate_compare_KP_dry(N, L; x0, hl, hr, CFL=0.45, limiter=:mc, Tstop=0
     x  = @. (0.5:1:N-0.5) * dx
 
     # initial state (η,m)
-    h0, u0 = ic_dry_dambreak(x; hl=hl, hr=hr, x0=x0)
+    h0, u0 = ic_dambreak(x; hl=hl, hr=hr, x0=x0)
     b  = bfun(x)
     η  = h0 .+ b
     m  = h0 .* u0
